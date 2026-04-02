@@ -1,0 +1,14 @@
+{
+  "users": [
+    {
+      "user_id": "admin",
+      "password": "admin88",
+      "enabled": true
+    },
+    {
+      "user_id": "panlijohn",
+      "password": "Johnpanli28",
+      "enabled": true
+    }
+  ]
+}

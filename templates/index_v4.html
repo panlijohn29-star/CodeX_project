@@ -1,0 +1,505 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Closing Report App V4</title>
+  <style>
+    :root {
+      --card: #fffaf3;
+      --ink: #1d2a36;
+      --accent: #145a7a;
+      --line: #d7c7b5;
+      --ok: #2e6b3a;
+      --warn: #9a5f00;
+      --bad: #a12727;
+      --muted: #5a6974;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      background:
+        radial-gradient(circle at top left, #fff6dd 0, transparent 32%),
+        linear-gradient(135deg, #f4efe8, #e8f0f2);
+      color: var(--ink);
+    }
+    .wrap {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 28px 20px 48px;
+    }
+    .hero, .panel, .runs-card {
+      padding: 24px;
+      border: 1px solid var(--line);
+      background: var(--card);
+      border-radius: 20px;
+      box-shadow: 0 18px 40px rgba(29, 42, 54, 0.08);
+    }
+    .hero-top, .run-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    h1 {
+      margin: 0 0 10px;
+      font-size: 38px;
+    }
+    .sub, .meta, .error, .status, .user-meta {
+      line-height: 1.5;
+      font-size: 14px;
+      color: var(--muted);
+    }
+    .grid {
+      margin-top: 20px;
+      display: grid;
+      grid-template-columns: 1.15fr 1fr;
+      gap: 20px;
+    }
+    .group {
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: #fff;
+    }
+    .group + .group { margin-top: 14px; }
+    .office-list {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 8px 14px;
+      margin-top: 10px;
+    }
+    label.office {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      font-size: 14px;
+    }
+    .actions {
+      margin-top: 18px;
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    button {
+      border: 0;
+      background: var(--accent);
+      color: white;
+      padding: 12px 18px;
+      border-radius: 999px;
+      cursor: pointer;
+      font-size: 15px;
+    }
+    button.cancel { background: #a85b16; }
+    button.secondary { background: #6b7d86; }
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    .bar {
+      width: 100%;
+      height: 16px;
+      border-radius: 999px;
+      background: #e5ddd2;
+      overflow: hidden;
+      margin: 12px 0 8px;
+    }
+    .fill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #1c7fa2, #57b7c7);
+      transition: width 0.3s ease;
+    }
+    .runs-card { margin-top: 20px; }
+    .account-grid {
+      margin-top: 20px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+    }
+    .account-list {
+      display: grid;
+      gap: 10px;
+      margin-top: 12px;
+    }
+    .account-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fff;
+    }
+    .inline-form {
+      display: grid;
+      gap: 10px;
+      margin-top: 14px;
+    }
+    .inline-form input {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      font-size: 14px;
+      background: #fffdf9;
+    }
+    .runs {
+      display: grid;
+      gap: 14px;
+      margin-top: 14px;
+    }
+    .run {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 16px;
+      background: #fff;
+    }
+    .pill {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      text-transform: uppercase;
+      background: #d9edf5;
+      color: var(--accent);
+    }
+    .pill.completed { background: #dff3e2; color: var(--ok); }
+    .pill.running, .pill.queued, .pill.cancelling { background: #fff0d6; color: var(--warn); }
+    .pill.failed, .pill.cancelled { background: #f9dada; color: var(--bad); }
+    a { color: var(--accent); }
+    @media (max-width: 820px) {
+      .grid, .account-grid { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 640px) {
+      h1 { font-size: 30px; }
+      .hero, .panel, .runs-card { padding: 18px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <div class="hero-top">
+        <div>
+          <h1>Closing Report Web App V4</h1>
+          <p class="sub">All offices are selected by default. You can remove offices you do not want, start a run, stop it if needed, and download the finished zip file.</p>
+        </div>
+        <div class="user-meta">Signed in as {{ user_id }} | <a href="/logout">Log out</a></div>
+      </div>
+    </section>
+
+    <div class="grid">
+      <section class="panel">
+        <strong>Office Selection</strong>
+        <div class="actions">
+          <button type="button" class="secondary" id="selectAllBtn">Select All</button>
+          <button type="button" class="secondary" id="clearAllBtn">Clear All</button>
+          <span class="status" id="selectionState">All offices selected by default.</span>
+        </div>
+        <div id="groups">
+          {% for group in office_groups %}
+          <div class="group">
+            <strong>{{ group.label }}</strong>
+            <div class="office-list">
+              {% for office in group.offices %}
+              <label class="office">
+                <input type="checkbox" name="office" value="{{ office }}" checked>
+                <span>{{ office }}</span>
+              </label>
+              {% endfor %}
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+        <div class="actions">
+          <button id="startBtn">Run Selected Reports</button>
+          <button id="cancelBtn" class="cancel" disabled>Stop Current Run</button>
+          <span class="status" id="runState">Ready</span>
+        </div>
+      </section>
+
+      <section class="panel">
+        <strong>Current Run</strong>
+        <div class="bar"><div class="fill" id="progressFill"></div></div>
+        <div id="progressText">No run started yet.</div>
+      </section>
+    </div>
+
+    <section class="runs-card">
+      <strong>Recent Runs</strong>
+      <div class="runs" id="runs"></div>
+    </section>
+
+    <div class="account-grid">
+      <section class="panel">
+        <strong>Change Password</strong>
+        <div class="inline-form">
+          <input id="currentPassword" type="password" placeholder="Current password">
+          <input id="newPassword" type="password" placeholder="New password">
+          <button id="changePasswordBtn">Update Password</button>
+          <div class="status" id="passwordState">Password tools ready.</div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <strong>Account Management</strong>
+        {% if is_admin %}
+        <div class="inline-form">
+          <input id="newUserId" type="text" placeholder="New user ID">
+          <input id="newUserPassword" type="password" placeholder="New user password">
+          <button id="createUserBtn">Add User</button>
+          <div class="status" id="accountState">Admin tools ready.</div>
+        </div>
+        {% else %}
+        <div class="status" id="accountState">Only admin can add or disable accounts.</div>
+        {% endif %}
+        <div class="account-list" id="accountList"></div>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    const startBtn = document.getElementById("startBtn");
+    const cancelBtn = document.getElementById("cancelBtn");
+    const selectAllBtn = document.getElementById("selectAllBtn");
+    const clearAllBtn = document.getElementById("clearAllBtn");
+    const selectionState = document.getElementById("selectionState");
+    const runState = document.getElementById("runState");
+    const progressFill = document.getElementById("progressFill");
+    const progressText = document.getElementById("progressText");
+    const runsEl = document.getElementById("runs");
+    const currentPassword = document.getElementById("currentPassword");
+    const newPassword = document.getElementById("newPassword");
+    const changePasswordBtn = document.getElementById("changePasswordBtn");
+    const passwordState = document.getElementById("passwordState");
+    const newUserId = document.getElementById("newUserId");
+    const newUserPassword = document.getElementById("newUserPassword");
+    const createUserBtn = document.getElementById("createUserBtn");
+    const accountState = document.getElementById("accountState");
+    const accountList = document.getElementById("accountList");
+    const officeInputs = () => Array.from(document.querySelectorAll('input[name="office"]'));
+    const isAdmin = {{ 'true' if is_admin else 'false' }};
+    let authUsers = {{ auth_users|tojson }};
+    let activeRunId = null;
+    let pollTimer = null;
+
+    function escapeHtml(text) {
+      return String(text ?? "").replace(/[&<>"']/g, (char) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        "\"": "&quot;",
+        "'": "&#39;"
+      }[char]));
+    }
+
+    function getSelectedOffices() {
+      return officeInputs().filter((input) => input.checked).map((input) => input.value);
+    }
+
+    function updateSelectionState() {
+      const selected = getSelectedOffices().length;
+      const total = officeInputs().length;
+      selectionState.textContent = `${selected} of ${total} offices selected`;
+    }
+
+    function setAllSelections(checked) {
+      officeInputs().forEach((input) => {
+        input.checked = checked;
+      });
+      updateSelectionState();
+    }
+
+    function renderRuns(runs) {
+      if (!runs.length) {
+        runsEl.innerHTML = "<div class='run'>No reports yet.</div>";
+        return;
+      }
+      runsEl.innerHTML = runs.map((run) => {
+        const total = run.total_tasks || 1;
+        const percent = Math.round((run.completed_tasks || 0) / total * 100);
+        const download = run.status === "completed" ? `<a href="/download/${run.run_id}">Download zip</a>` : "";
+        const selected = (run.selected_offices || []).join(", ");
+        const error = run.error ? `<div class="error">Error: ${escapeHtml(run.error)}</div>` : "";
+        return `
+          <div class="run">
+            <div class="run-top">
+              <div>
+                <div><strong>Run ${escapeHtml(run.run_id)}</strong></div>
+                <div class="meta">Created: ${escapeHtml(run.created_at)}</div>
+              </div>
+              <span class="pill ${escapeHtml(run.status)}">${escapeHtml(run.status)}</span>
+            </div>
+            <div class="meta">${escapeHtml(run.message || "")}</div>
+            <div class="meta">Progress: ${run.completed_tasks || 0}/${total} (${percent}%)</div>
+            <div class="meta">Offices: ${escapeHtml(selected)}</div>
+            <div class="meta">${download}</div>
+            ${error}
+          </div>
+        `;
+      }).join("");
+    }
+
+    function renderAccounts() {
+      accountList.innerHTML = authUsers.map((user) => {
+        const enabledLabel = user.enabled ? "Enabled" : "Disabled";
+        const toggleAction = user.enabled ? "Disable" : "Enable";
+        const toggleButton = isAdmin
+          ? `<button type="button" class="secondary" data-user-id="${escapeHtml(user.user_id)}" data-enabled="${user.enabled ? 'false' : 'true'}" ${user.user_id === 'admin' ? 'disabled' : ''}>${toggleAction}</button>`
+          : "";
+        return `
+          <div class="account-row">
+            <div>
+              <strong>${escapeHtml(user.user_id)}</strong>
+              <div class="meta">${enabledLabel}</div>
+            </div>
+            <div>${toggleButton}</div>
+          </div>
+        `;
+      }).join("");
+
+      if (isAdmin) {
+        accountList.querySelectorAll("button[data-user-id]").forEach((button) => {
+          button.addEventListener("click", async () => {
+            const userId = button.getAttribute("data-user-id");
+            const enabled = button.getAttribute("data-enabled") === "true";
+            const response = await fetch("/api/account/toggle", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ user_id: userId, enabled })
+            });
+            const payload = await response.json();
+            if (!response.ok) {
+              accountState.textContent = payload.error || "Unable to update account";
+              return;
+            }
+            authUsers = payload.users;
+            accountState.textContent = `Updated account ${userId}`;
+            renderAccounts();
+          });
+        });
+      }
+    }
+
+    async function loadRuns() {
+      const response = await fetch("/api/runs");
+      if (!response.ok) return;
+      const runs = await response.json();
+      renderRuns(runs);
+    }
+
+    function setActiveControls(status) {
+      const running = ["queued", "running", "cancelling"].includes(status);
+      startBtn.disabled = running;
+      cancelBtn.disabled = !running || !activeRunId;
+    }
+
+    async function pollStatus() {
+      if (!activeRunId) return;
+      const response = await fetch(`/api/status/${activeRunId}`);
+      if (!response.ok) return;
+      const run = await response.json();
+      const total = run.total_tasks || 1;
+      const percent = Math.round((run.completed_tasks || 0) / total * 100);
+      progressFill.style.width = `${percent}%`;
+      progressText.textContent = `${run.message} (${run.completed_tasks}/${total})`;
+      runState.textContent = `Run ${run.run_id}: ${run.status}`;
+      setActiveControls(run.status);
+      await loadRuns();
+      if (["completed", "failed", "cancelled"].includes(run.status)) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+        activeRunId = null;
+        setActiveControls("completed");
+      }
+    }
+
+    selectAllBtn.addEventListener("click", () => setAllSelections(true));
+    clearAllBtn.addEventListener("click", () => setAllSelections(false));
+    officeInputs().forEach((input) => input.addEventListener("change", updateSelectionState));
+
+    startBtn.addEventListener("click", async () => {
+      const offices = getSelectedOffices();
+      if (!offices.length) {
+        runState.textContent = "Select at least one office";
+        return;
+      }
+      startBtn.disabled = true;
+      runState.textContent = "Starting new run...";
+      progressFill.style.width = "0%";
+      progressText.textContent = "Preparing report run...";
+      const response = await fetch("/api/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ offices })
+      });
+      const payload = await response.json();
+      activeRunId = payload.run_id;
+      setActiveControls("running");
+      await loadRuns();
+      await pollStatus();
+      pollTimer = setInterval(pollStatus, 3000);
+    });
+
+    cancelBtn.addEventListener("click", async () => {
+      if (!activeRunId) return;
+      cancelBtn.disabled = true;
+      runState.textContent = `Run ${activeRunId}: cancelling`;
+      await fetch(`/api/cancel/${activeRunId}`, { method: "POST" });
+      await pollStatus();
+    });
+
+    changePasswordBtn.addEventListener("click", async () => {
+      const response = await fetch("/api/account/password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          current_password: currentPassword.value,
+          new_password: newPassword.value
+        })
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        passwordState.textContent = payload.error || "Unable to change password";
+        return;
+      }
+      currentPassword.value = "";
+      newPassword.value = "";
+      passwordState.textContent = "Password updated successfully";
+    });
+
+    if (isAdmin && createUserBtn) {
+      createUserBtn.addEventListener("click", async () => {
+        const response = await fetch("/api/account", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            user_id: newUserId.value,
+            password: newUserPassword.value,
+            enabled: true
+          })
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          accountState.textContent = payload.error || "Unable to add user";
+          return;
+        }
+        authUsers = payload.users;
+        newUserId.value = "";
+        newUserPassword.value = "";
+        accountState.textContent = "User created";
+        renderAccounts();
+      });
+    }
+
+    updateSelectionState();
+    loadRuns();
+    renderAccounts();
+  </script>
+</body>
+</html>
