@@ -142,6 +142,9 @@ DB_CONFIG = {
         "db": "scdbca",
         "charset": "utf8mb4",
         "cursorclass": pymysql.cursors.SSDictCursor,
+        "connect_timeout": 10,
+        "read_timeout": 600,
+        "write_timeout": 600,
     },
     "scdbus": {
         "host": "aauw-db-us-sc.mysql.database.azure.com",
@@ -151,6 +154,9 @@ DB_CONFIG = {
         "db": "scdbus",
         "charset": "utf8mb4",
         "cursorclass": pymysql.cursors.SSDictCursor,
+        "connect_timeout": 10,
+        "read_timeout": 600,
+        "write_timeout": 600,
     },
 }
 
@@ -295,11 +301,15 @@ def list_runs():
     return runs
 
 
-def _register_connection(run_id, office, connection):
+def _register_connection(run_id, office, db_name, connection):
     with RUNS_LOCK:
         run_info = RUNS.get(run_id)
         if run_info:
-            run_info["active_connections"][office] = connection
+            run_info["active_connections"][office] = {
+                "db_name": db_name,
+                "thread_id": connection.thread_id(),
+                "connection": connection,
+            }
 
 
 def _unregister_connection(run_id, office):
@@ -307,6 +317,15 @@ def _unregister_connection(run_id, office):
         run_info = RUNS.get(run_id)
         if run_info:
             run_info["active_connections"].pop(office, None)
+
+
+def _kill_db_thread(db_name, thread_id):
+    kill_connection = pymysql.connect(**DB_CONFIG[db_name])
+    try:
+        with kill_connection.cursor() as cursor:
+            cursor.execute("KILL {0}".format(int(thread_id)))
+    finally:
+        kill_connection.close()
 
 
 def _should_cancel(run_id):
@@ -324,9 +343,13 @@ def cancel_run(run_id):
         run_info["cancel_event"].set()
         active_connections = list(run_info["active_connections"].values())
         finished = run_info["status"] in ("completed", "failed", "cancelled")
-    for connection in active_connections:
+    for connection_info in active_connections:
         try:
-            connection.close()
+            _kill_db_thread(connection_info["db_name"], connection_info["thread_id"])
+        except Exception:
+            pass
+        try:
+            connection_info["connection"].close()
         except Exception:
             pass
     if finished:
@@ -343,7 +366,7 @@ def create_report(run_id, office, db_name, output_dir):
     excel_path = os.path.join(output_dir, excel_name)
 
     cnxn = pymysql.connect(**DB_CONFIG[db_name])
-    _register_connection(run_id, office, cnxn)
+    _register_connection(run_id, office, db_name, cnxn)
     try:
         if _should_cancel(run_id):
             raise RuntimeError("Run cancelled by user")
