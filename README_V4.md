@@ -49,3 +49,4 @@ Then open [http://localhost:5001](http://localhost:5001).
 - The original app still remains in `app.py`
 - V4 run output is stored in `reports_v4/`
 - Cancellation is best-effort: the app requests stop immediately and closes active DB connections when possible
+- The report SQL is maintained in [closing_report_v4.sql](C:\Users\JohnPan\Documents\CodeX_project\closing_report_v4.sql)

@@ -1,1 +1,37 @@
-/reports_v4
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Local environment/config
+.env
+.env.*
+!.env.example
+
+# Flask/runtime files
+instance/
+*.log
+*.sqlite
+*.sqlite3
+
+# Build/test/tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Generated report exports
+reports_v4/
+
+# Local scratch files
+tmp/
+temp/
