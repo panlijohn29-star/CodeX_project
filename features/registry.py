@@ -1,8 +1,12 @@
 import features.closing_report as closing_report
+import features.archive_currency_invoice as archive_currency_invoice
+import features.related_office_modification as related_office_modification
 
 
 FEATURES = {
     closing_report.FEATURE["id"]: closing_report.FEATURE,
+    archive_currency_invoice.FEATURE["id"]: archive_currency_invoice.FEATURE,
+    related_office_modification.FEATURE["id"]: related_office_modification.FEATURE,
 }
 
 
