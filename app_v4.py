@@ -4,11 +4,12 @@ import os
 
 from flask import Flask, abort, jsonify, redirect, render_template, request, send_file, session, url_for
 
-from report_service_v4 import cancel_run, get_office_groups, get_run, list_runs, start_run
+from features import get_feature, list_features
+from run_service import cancel_run, get_run, list_runs, start_run
 
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", "closing-report-v4-secret")
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", "report-platform-secret")
 
 AUTH_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "auth_users_v4.json")
 
@@ -79,12 +80,33 @@ def logout():
 @require_login
 def index_v4():
     return render_template(
-        "index_v4.html",
+        "dashboard.html",
+        features=list_features(),
         runs=list_runs(),
-        office_groups=get_office_groups(),
         user_id=session.get("user_id", "admin"),
         auth_users=load_auth_users(),
         is_admin=is_admin_user(),
+    )
+
+
+@app.get("/features/<feature_id>")
+@require_login
+def feature_page(feature_id):
+    feature = get_feature(feature_id)
+    if not feature:
+        abort(404)
+    return render_template(
+        "feature_run.html",
+        feature={
+            "id": feature["id"],
+            "title": feature["title"],
+            "category": feature["category"],
+            "description": feature["description"],
+            "supports_cancel": feature.get("supports_cancel", False),
+            "output_type": feature.get("output_type", "files"),
+            "input_schema": feature.get("input_schema", []),
+        },
+        user_id=session.get("user_id", "admin"),
     )
 
 
@@ -161,27 +183,37 @@ def toggle_account():
     return jsonify({"error": "User not found"}), 404
 
 
-@app.post("/api/run")
+@app.get("/api/features")
 @require_login
-def create_run_v4():
+def api_features():
+    return jsonify(list_features())
+
+
+@app.post("/api/runs")
+@require_login
+def create_run():
     payload = request.get_json(silent=True) or {}
-    selected_offices = payload.get("offices", [])
-    run_id = start_run(selected_offices)
+    feature_id = payload.get("feature_id", "")
+    inputs = payload.get("inputs", {})
+    try:
+        run_id = start_run(feature_id, inputs)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     return jsonify({"run_id": run_id})
 
 
-@app.post("/api/cancel/<run_id>")
+@app.post("/api/runs/<run_id>/cancel")
 @require_login
-def cancel_run_v4(run_id):
+def cancel_run_api(run_id):
     run_info = cancel_run(run_id)
     if not run_info:
         abort(404)
     return jsonify(run_info)
 
 
-@app.get("/api/status/<run_id>")
+@app.get("/api/runs/<run_id>")
 @require_login
-def run_status_v4(run_id):
+def run_status(run_id):
     run_info = get_run(run_id)
     if not run_info:
         abort(404)
@@ -190,8 +222,31 @@ def run_status_v4(run_id):
 
 @app.get("/api/runs")
 @require_login
-def runs_v4():
+def runs_api():
     return jsonify(list_runs())
+
+
+@app.post("/api/run")
+@require_login
+def create_run_v4_legacy():
+    payload = request.get_json(silent=True) or {}
+    try:
+        run_id = start_run("closing_report", {"offices": payload.get("offices", [])})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"run_id": run_id})
+
+
+@app.post("/api/cancel/<run_id>")
+@require_login
+def cancel_run_v4_legacy(run_id):
+    return cancel_run_api(run_id)
+
+
+@app.get("/api/status/<run_id>")
+@require_login
+def run_status_v4_legacy(run_id):
+    return run_status(run_id)
 
 
 @app.get("/download/<run_id>")
@@ -205,6 +260,19 @@ def download_v4(run_id):
     if not os.path.exists(run_info["zip_path"]):
         abort(404)
     return send_file(run_info["zip_path"], as_attachment=True, download_name=run_info["zip_name"])
+
+
+@app.get("/download/<run_id>/<path:filename>")
+@require_login
+def download_output(run_id, filename):
+    run_info = get_run(run_id)
+    if not run_info or run_info["status"] != "completed":
+        abort(404)
+    for output in run_info.get("outputs", []):
+        output_path = output.get("path")
+        if output.get("name") == filename and output_path and os.path.exists(output_path):
+            return send_file(output_path, as_attachment=True, download_name=filename)
+    abort(404)
 
 
 if __name__ == "__main__":

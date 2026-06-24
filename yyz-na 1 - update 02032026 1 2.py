@@ -5,6 +5,7 @@ import time as t
 import datetime as d
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from platform_config import get_db_config
 # from O365 import Message, Attachment
 #INTERNAL 192.168.0.24
 #EXTERNAL 64.60.13.218
@@ -133,26 +134,10 @@ S_Total = t.time()
 MAX_WORKERS = 4
 PRINT_LOCK = threading.Lock()
 
-DB_CONFIG = {
-    'scdbca': {
-        'host': 'aauw-db-us-sc.mysql.database.azure.com',
-        'port': 3306,
-        'user': 'john',
-        'password': 'john123456#A',
-        'db': 'scdbca',
-        'charset': 'utf8mb4',
-        'cursorclass': pymysql.cursors.SSDictCursor,
-    },
-    'scdbus': {
-        'host': 'aauw-db-us-sc.mysql.database.azure.com',
-        'port': 3306,
-        'user': 'john',
-        'password': 'john123456#A',
-        'db': 'scdbus',
-        'charset': 'utf8mb4',
-        'cursorclass': pymysql.cursors.SSDictCursor,
-    },
-}
+def connect_db(db_name):
+    config = get_db_config(db_name)
+    config["cursorclass"] = pymysql.cursors.SSDictCursor
+    return pymysql.connect(**config)
 
 def fetch_dataframe(connection, query):
     with connection.cursor() as cursor:
@@ -179,7 +164,7 @@ def create_report(office, db_name):
     safe_print("Begin task for {0} office ...".format(office))
     safe_print("Searching data on DB for {0} ...".format(office))
 
-    cnxn = pymysql.connect(**DB_CONFIG[db_name])
+    cnxn = connect_db(db_name)
     try:
         df = fetch_dataframe(cnxn, script_fnl)
     finally:
