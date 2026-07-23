@@ -6,6 +6,7 @@ from flask import Flask, abort, jsonify, redirect, render_template, request, sen
 
 import features.related_office_modification as related_office_modification
 import features.archive_currency_invoice as archive_currency_invoice
+import features.ar_ap_breakdown as ar_ap_breakdown
 from features import get_feature, list_features
 from run_service import cancel_run, get_run, list_runs, start_run
 
@@ -343,6 +344,40 @@ def archive_currency_invoice_execute():
             payload.get("db_profile"),
             payload.get("invoice_numbers"),
             payload.get("report_date_range"),
+        )
+    )
+
+
+@app.post("/api/ar-ap-breakdown/search")
+@require_login
+def ar_ap_breakdown_search():
+    payload = request.get_json(silent=True) or {}
+    return _interactive_tool_response(
+        lambda: ar_ap_breakdown.search_payload(
+            payload.get("db_profile"),
+            payload.get("report_type"),
+            payload.get("etd_from"),
+            payload.get("etd_to"),
+            payload.get("customer"),
+            payload.get("job_type"),
+            payload.get("billing_office"),
+        )
+    )
+
+
+@app.post("/api/ar-ap-breakdown/preview")
+@require_login
+def ar_ap_breakdown_preview():
+    payload = request.get_json(silent=True) or {}
+    return _interactive_tool_response(
+        lambda: ar_ap_breakdown.preview_payload(
+            payload.get("db_profile"),
+            payload.get("report_type"),
+            payload.get("etd_from"),
+            payload.get("etd_to"),
+            payload.get("customer"),
+            payload.get("job_type"),
+            payload.get("billing_office"),
         )
     )
 

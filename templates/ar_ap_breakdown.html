@@ -1,0 +1,529 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ feature.title }} | Report Platform</title>
+  <style>
+    :root {
+      --bg: #f6f7f9;
+      --surface: #ffffff;
+      --ink: #17202a;
+      --muted: #607080;
+      --line: #d8dee6;
+      --accent: #145a7a;
+      --bad: #a12727;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Arial, Helvetica, sans-serif; background: var(--bg); color: var(--ink); }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .shell { max-width: 1280px; margin: 0 auto; padding: 24px 20px 44px; }
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--line);
+    }
+    h1 { margin: 0; font-size: 28px; line-height: 1.2; }
+    h2 { margin: 0 0 14px; font-size: 18px; }
+    .muted, .meta, .status, .error { color: var(--muted); font-size: 14px; line-height: 1.45; }
+    .error { color: var(--bad); }
+    .section {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 18px;
+      margin-top: 22px;
+    }
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(220px, 1fr));
+      gap: 16px;
+      align-items: end;
+    }
+    .field { display: grid; gap: 8px; }
+    .field label, .choice-label { font-size: 14px; font-weight: 700; }
+    input, select {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      font-size: 14px;
+      background: #fff;
+    }
+    .options { display: flex; flex-wrap: wrap; gap: 10px; }
+    .option {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 40px;
+      cursor: pointer;
+      padding: 9px 12px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fbfcfd;
+    }
+    .option input { width: auto; }
+    button {
+      border: 0;
+      background: var(--accent);
+      color: white;
+      padding: 10px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 700;
+    }
+    button.secondary { background: #607080; }
+    button.small { padding: 8px 12px; font-size: 13px; }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 16px; }
+    .result-toolbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
+    .tabs {
+      display: flex;
+      gap: 8px;
+      border-bottom: 1px solid var(--line);
+      margin-bottom: 14px;
+    }
+    .tab-button {
+      border: 1px solid transparent;
+      border-bottom: 0;
+      background: transparent;
+      color: var(--muted);
+      padding: 9px 12px;
+      border-radius: 6px 6px 0 0;
+    }
+    .tab-button.active {
+      border-color: var(--line);
+      background: #fbfcfd;
+      color: var(--ink);
+    }
+    .table-scroll { width: 100%; overflow-x: auto; }
+    .table-scroll table { min-width: 1180px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+    th, td { border-bottom: 1px solid var(--line); padding: 10px 8px; text-align: left; font-size: 14px; vertical-align: top; }
+    th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap; }
+    .sort-button {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border: 0;
+      background: transparent;
+      color: inherit;
+      padding: 0;
+      font: inherit;
+      letter-spacing: inherit;
+      text-transform: inherit;
+    }
+    .sort-button:hover { color: var(--accent); }
+    .sort-icon { display: inline-block; width: 10px; color: var(--accent); }
+    td { white-space: nowrap; }
+    pre {
+      margin: 0;
+      padding: 14px;
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fbfcfd;
+      color: var(--ink);
+      font-size: 13px;
+      line-height: 1.5;
+      white-space: pre;
+    }
+    .hidden { display: none; }
+    @media (max-width: 940px) {
+      .form-grid { grid-template-columns: 1fr; }
+      .topbar { align-items: flex-start; flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <div class="meta"><a href="/">Report Platform</a> / {{ feature.category }}</div>
+        <h1>{{ feature.title }}</h1>
+        <div class="muted">{{ feature.description }}</div>
+      </div>
+      <div class="muted">Signed in as {{ user_id }} | <a href="/logout">Log out</a></div>
+    </header>
+
+    <section class="section">
+      <h2>Search</h2>
+      <div class="form-grid">
+        <div class="field">
+          <div class="choice-label">Database</div>
+          <div class="options">
+            {% for profile in db_profiles %}
+            <label class="option">
+              <input type="radio" name="dbProfile" value="{{ profile }}" {% if loop.first %}checked{% endif %}>
+              <span>{{ profile }}</span>
+            </label>
+            {% endfor %}
+          </div>
+        </div>
+
+        <div class="field">
+          <div class="choice-label">AR / AP</div>
+          <div class="options">
+            <label class="option">
+              <input type="radio" name="reportType" value="AR">
+              <span>AR</span>
+            </label>
+            <label class="option">
+              <input type="radio" name="reportType" value="AP">
+              <span>AP</span>
+            </label>
+            <label class="option">
+              <input type="radio" name="reportType" value="AR_AP">
+              <span>AR&amp;AP</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="customer">Customer</label>
+          <input id="customer" type="text" placeholder="Customer name or code">
+        </div>
+
+        <div class="field">
+          <label for="jobType">JOB_TYPE</label>
+          <select id="jobType">
+            <option value="ALL" selected>ALL</option>
+            <option value="AE">AE</option>
+            <option value="AI">AI</option>
+            <option value="DO">DO</option>
+            <option value="OE">OE</option>
+            <option value="OI">OI</option>
+            <option value="OT">OT</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="billingOffice">BILLING_OFFICE</label>
+          <input id="billingOffice" type="text" placeholder="Billing office code">
+        </div>
+
+        <div class="field">
+          <label for="etdFrom">ETD from</label>
+          <input id="etdFrom" type="date">
+        </div>
+
+        <div class="field">
+          <label for="etdTo">ETD to</label>
+          <input id="etdTo" type="date">
+        </div>
+      </div>
+
+      <div class="actions">
+        <button id="previewBtn" type="button" class="secondary">View Query</button>
+        <button id="searchBtn" type="button">Run Report</button>
+        <button id="resetBtn" type="button" class="secondary">Reset</button>
+        <span id="statusText" class="status">Ready</span>
+      </div>
+    </section>
+
+    <section id="resultPanel" class="section hidden">
+      <div class="tabs" role="tablist" aria-label="AR/AP report views">
+        <button id="resultTab" class="tab-button active" type="button" data-tab="result">Result</button>
+        <button id="queryTab" class="tab-button" type="button" data-tab="query">Query</button>
+      </div>
+      <div class="result-toolbar">
+        <div class="meta" id="resultMeta"></div>
+        <button id="downloadBtn" type="button" class="secondary small" disabled>Download CSV</button>
+      </div>
+      <div id="resultView" class="table-scroll">
+        <table>
+          <thead>
+            <tr id="resultHead"></tr>
+          </thead>
+          <tbody id="resultRows"></tbody>
+        </table>
+      </div>
+      <div id="queryView" class="hidden">
+        <pre id="querySql"></pre>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const customer = document.getElementById("customer");
+    const jobType = document.getElementById("jobType");
+    const billingOffice = document.getElementById("billingOffice");
+    const etdFrom = document.getElementById("etdFrom");
+    const etdTo = document.getElementById("etdTo");
+    const previewBtn = document.getElementById("previewBtn");
+    const searchBtn = document.getElementById("searchBtn");
+    const resetBtn = document.getElementById("resetBtn");
+    const statusText = document.getElementById("statusText");
+    const resultPanel = document.getElementById("resultPanel");
+    const resultMeta = document.getElementById("resultMeta");
+    const downloadBtn = document.getElementById("downloadBtn");
+    const resultHead = document.getElementById("resultHead");
+    const resultRows = document.getElementById("resultRows");
+    const resultView = document.getElementById("resultView");
+    const queryView = document.getElementById("queryView");
+    const querySql = document.getElementById("querySql");
+    const tabButtons = Array.from(document.querySelectorAll(".tab-button"));
+    let currentColumns = [];
+    let currentRows = [];
+    let sortState = { column: "", direction: "asc" };
+
+    function escapeHtml(text) {
+      return String(text ?? "").replace(/[&<>"']/g, (char) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        "\"": "&quot;",
+        "'": "&#39;"
+      }[char]));
+    }
+
+    function selectedValue(name) {
+      const selected = document.querySelector(`input[name="${name}"]:checked`);
+      return selected ? selected.value : "";
+    }
+
+    function setBusy(isBusy) {
+      previewBtn.disabled = isBusy;
+      searchBtn.disabled = isBusy;
+      resetBtn.disabled = isBusy;
+    }
+
+    function showStatus(message) {
+      statusText.textContent = message;
+      statusText.className = "status";
+    }
+
+    function showError(message) {
+      statusText.textContent = message || "Request failed";
+      statusText.className = "error";
+    }
+
+    function clearResults() {
+      resultPanel.classList.add("hidden");
+      resultMeta.textContent = "";
+      resultHead.innerHTML = "";
+      resultRows.innerHTML = "";
+      querySql.textContent = "";
+      downloadBtn.disabled = true;
+      currentColumns = [];
+      currentRows = [];
+      sortState = { column: "", direction: "asc" };
+      setActiveTab("result");
+    }
+
+    async function postJson(url, body) {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || "Request failed");
+      }
+      return payload;
+    }
+
+    function reportRequestBody() {
+      return {
+        db_profile: selectedValue("dbProfile"),
+        report_type: selectedValue("reportType"),
+        etd_from: etdFrom.value,
+        etd_to: etdTo.value,
+        customer: customer.value,
+        job_type: jobType.value,
+        billing_office: billingOffice.value
+      };
+    }
+
+    function setActiveTab(tabName) {
+      tabButtons.forEach((button) => {
+        button.classList.toggle("active", button.dataset.tab === tabName);
+      });
+      resultView.classList.toggle("hidden", tabName !== "result");
+      queryView.classList.toggle("hidden", tabName !== "query");
+    }
+
+    function sortValue(value) {
+      const text = String(value ?? "").trim();
+      if (text !== "" && /^-?\d+(\.\d+)?$/.test(text.replace(/,/g, ""))) {
+        return Number(text.replace(/,/g, ""));
+      }
+      return text.toLowerCase();
+    }
+
+    function sortedRows() {
+      if (!sortState.column) {
+        return currentRows;
+      }
+      const direction = sortState.direction === "desc" ? -1 : 1;
+      return [...currentRows].sort((left, right) => {
+        const leftValue = sortValue(left[sortState.column]);
+        const rightValue = sortValue(right[sortState.column]);
+        if (leftValue < rightValue) return -1 * direction;
+        if (leftValue > rightValue) return 1 * direction;
+        return 0;
+      });
+    }
+
+    function csvValue(value) {
+      const text = String(value ?? "");
+      return `"${text.replace(/"/g, '""')}"`;
+    }
+
+    function downloadCsv() {
+      if (!currentColumns.length || !currentRows.length) {
+        return;
+      }
+      const rows = sortedRows();
+      const csvLines = [
+        currentColumns.map(csvValue).join(","),
+        ...rows.map((row) => currentColumns.map((column) => csvValue(row[column])).join(","))
+      ];
+      const blob = new Blob(["\uFEFF" + csvLines.join("\r\n")], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      const stamp = new Date().toISOString().slice(0, 10);
+      link.href = url;
+      link.download = `AR_AP_breakdown_${stamp}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    function renderTable() {
+      resultHead.innerHTML = currentColumns.map((column) => {
+        const icon = sortState.column === column ? (sortState.direction === "asc" ? "^" : "v") : "";
+        return `
+          <th>
+            <button class="sort-button" type="button" data-column="${escapeHtml(column)}">
+              <span>${escapeHtml(column)}</span><span class="sort-icon">${icon}</span>
+            </button>
+          </th>
+        `;
+      }).join("");
+
+      const rows = sortedRows();
+      resultRows.innerHTML = rows.length ? rows.map((row) => `
+        <tr>
+          ${currentColumns.map((column) => `<td>${escapeHtml(row[column])}</td>`).join("")}
+        </tr>
+      `).join("") : `<tr><td colspan="${currentColumns.length || 1}" class="muted">No records found.</td></tr>`;
+
+      resultHead.querySelectorAll(".sort-button").forEach((button) => {
+        button.addEventListener("click", () => {
+          const column = button.getAttribute("data-column");
+          if (sortState.column === column) {
+            sortState.direction = sortState.direction === "asc" ? "desc" : "asc";
+          } else {
+            sortState = { column, direction: "asc" };
+          }
+          renderTable();
+        });
+      });
+    }
+
+    function renderResult(payload) {
+      currentColumns = payload.columns || [];
+      currentRows = payload.rows || [];
+      sortState = { column: "", direction: "asc" };
+      resultPanel.classList.remove("hidden");
+      resultMeta.textContent = `${payload.db_profile} / ${payload.report_type} / ${payload.row_count} row${payload.row_count === 1 ? "" : "s"}`;
+      downloadBtn.disabled = !currentRows.length;
+      renderTable();
+      querySql.textContent = payload.query_sql || "";
+      setActiveTab("result");
+    }
+
+    function renderQuery(payload) {
+      resultPanel.classList.remove("hidden");
+      resultMeta.textContent = `${payload.db_profile} / ${payload.report_type} / query preview`;
+      resultHead.innerHTML = "";
+      resultRows.innerHTML = "";
+      downloadBtn.disabled = true;
+      currentColumns = [];
+      currentRows = [];
+      sortState = { column: "", direction: "asc" };
+      querySql.textContent = payload.query_sql || "";
+      setActiveTab("query");
+    }
+
+    tabButtons.forEach((button) => {
+      button.addEventListener("click", () => setActiveTab(button.dataset.tab));
+    });
+
+    downloadBtn.addEventListener("click", downloadCsv);
+
+    previewBtn.addEventListener("click", async () => {
+      clearResults();
+      const body = reportRequestBody();
+      if (!body.report_type) {
+        showError("Please select AR, AP, or AR&AP");
+        return;
+      }
+
+      setBusy(true);
+      showStatus("Building query...");
+      try {
+        const payload = await postJson("/api/ar-ap-breakdown/preview", body);
+        renderQuery(payload);
+        showStatus("Query ready");
+      } catch (error) {
+        showError(error.message);
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    searchBtn.addEventListener("click", async () => {
+      clearResults();
+      const body = reportRequestBody();
+      if (!body.report_type) {
+        showError("Please select AR, AP, or AR&AP");
+        return;
+      }
+
+      setBusy(true);
+      showStatus("Running report...");
+      try {
+        const payload = await postJson("/api/ar-ap-breakdown/search", body);
+        renderResult(payload);
+        showStatus("Report completed");
+      } catch (error) {
+        showError(error.message);
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    resetBtn.addEventListener("click", () => {
+      document.querySelectorAll('input[name="reportType"]').forEach((input) => { input.checked = false; });
+      customer.value = "";
+      jobType.value = "ALL";
+      billingOffice.value = "";
+      etdFrom.value = "";
+      etdTo.value = "";
+      clearResults();
+      showStatus("Ready");
+    });
+
+    [customer, billingOffice, etdFrom, etdTo].forEach((input) => input.addEventListener("input", clearResults));
+    jobType.addEventListener("change", clearResults);
+    document.querySelectorAll('input[name="reportType"], input[name="dbProfile"]').forEach((input) => {
+      input.addEventListener("change", clearResults);
+    });
+  </script>
+</body>
+</html>
