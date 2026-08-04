@@ -4,11 +4,15 @@ import os
 
 from flask import Flask, abort, jsonify, redirect, render_template, request, send_file, session, url_for
 
-from report_service_v4 import cancel_run, get_office_groups, get_run, list_runs, start_run
+import features.related_office_modification as related_office_modification
+import features.archive_currency_invoice as archive_currency_invoice
+import features.ar_ap_breakdown as ar_ap_breakdown
+from features import get_feature, list_features
+from run_service import cancel_run, get_run, list_runs, start_run
 
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", "closing-report-v4-secret")
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", "report-platform-secret")
 
 AUTH_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "auth_users_v4.json")
 
@@ -21,8 +25,16 @@ def load_auth_users():
         user_id = item.get("user_id", "").strip()
         password = item.get("password", "")
         enabled = bool(item.get("enabled", True))
+        favourites = item.get("favourites", [])
+        if not isinstance(favourites, list):
+            favourites = []
         if user_id:
-            users.append({"user_id": user_id, "password": password, "enabled": enabled})
+            users.append({
+                "user_id": user_id,
+                "password": password,
+                "enabled": enabled,
+                "favourites": [str(feature_id) for feature_id in favourites],
+            })
     return users
 
 
@@ -37,6 +49,29 @@ def get_auth_user(user_id):
         if user["user_id"] == user_id:
             return user
     return None
+
+
+def get_user_favourites(user_id):
+    auth_user = get_auth_user(user_id)
+    if not auth_user:
+        return []
+    return auth_user.get("favourites", [])
+
+
+def list_features_for_user(user_id):
+    favourites = set(get_user_favourites(user_id))
+    features = []
+    for feature in list_features():
+        item = dict(feature)
+        item["is_favourite"] = item["id"] in favourites
+        features.append(item)
+    return sorted(features, key=lambda item: (not item["is_favourite"], item["title"].lower()))
+
+
+def group_features_by_category(features):
+    reports = [feature for feature in features if feature["category"].lower() == "reports"]
+    tools = [feature for feature in features if feature["category"].lower() == "tools"]
+    return reports, tools
 
 
 def is_admin_user():
@@ -78,13 +113,49 @@ def logout():
 @app.route("/")
 @require_login
 def index_v4():
+    user_id = session.get("user_id", "admin")
+    features = list_features_for_user(user_id)
+    reports, tools = group_features_by_category(features)
     return render_template(
-        "index_v4.html",
-        runs=list_runs(),
-        office_groups=get_office_groups(),
-        user_id=session.get("user_id", "admin"),
+        "dashboard.html",
+        reports=reports,
+        tools=tools,
+        user_id=user_id,
         auth_users=load_auth_users(),
         is_admin=is_admin_user(),
+    )
+
+
+@app.get("/features/<feature_id>")
+@require_login
+def feature_page(feature_id):
+    feature = get_feature(feature_id)
+    if not feature:
+        abort(404)
+    if feature.get("template"):
+        return render_template(
+            feature["template"],
+            feature={
+                "id": feature["id"],
+                "title": feature["title"],
+                "category": feature["category"],
+                "description": feature["description"],
+            },
+            db_profiles=feature.get("db_profiles", related_office_modification.ALLOWED_DB_PROFILES),
+            user_id=session.get("user_id", "admin"),
+        )
+    return render_template(
+        "feature_run.html",
+        feature={
+            "id": feature["id"],
+            "title": feature["title"],
+            "category": feature["category"],
+            "description": feature["description"],
+            "supports_cancel": feature.get("supports_cancel", False),
+            "output_type": feature.get("output_type", "files"),
+            "input_schema": feature.get("input_schema", []),
+        },
+        user_id=session.get("user_id", "admin"),
     )
 
 
@@ -134,7 +205,7 @@ def create_account():
     if any(user["user_id"] == user_id for user in users):
         return jsonify({"error": "User already exists"}), 400
 
-    users.append({"user_id": user_id, "password": password, "enabled": enabled})
+    users.append({"user_id": user_id, "password": password, "enabled": enabled, "favourites": []})
     save_auth_users(users)
     return jsonify({"ok": True, "users": users})
 
@@ -161,27 +232,181 @@ def toggle_account():
     return jsonify({"error": "User not found"}), 404
 
 
-@app.post("/api/run")
+@app.post("/api/favourites")
 @require_login
-def create_run_v4():
+def update_favourite():
     payload = request.get_json(silent=True) or {}
-    selected_offices = payload.get("offices", [])
-    run_id = start_run(selected_offices)
+    feature_id = payload.get("feature_id", "").strip()
+    favourite = bool(payload.get("favourite", True))
+    user_id = session.get("user_id", "")
+
+    if not get_feature(feature_id):
+        return jsonify({"error": "Feature not found"}), 404
+
+    users = load_auth_users()
+    for user in users:
+        if user["user_id"] == user_id:
+            favourites = set(user.get("favourites", []))
+            if favourite:
+                favourites.add(feature_id)
+            else:
+                favourites.discard(feature_id)
+            user["favourites"] = sorted(favourites)
+            save_auth_users(users)
+            features = list_features_for_user(user_id)
+            reports, tools = group_features_by_category(features)
+            return jsonify({"ok": True, "favourites": user["favourites"], "reports": reports, "tools": tools})
+
+    return jsonify({"error": "User not found"}), 404
+
+
+@app.get("/api/features")
+@require_login
+def api_features():
+    return jsonify(list_features_for_user(session.get("user_id", "")))
+
+
+def _related_office_response(action):
+    try:
+        return jsonify(action())
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+def _interactive_tool_response(action):
+    try:
+        return jsonify(action())
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.post("/api/related-office/lookup")
+@require_login
+def related_office_lookup():
+    payload = request.get_json(silent=True) or {}
+    return _related_office_response(
+        lambda: related_office_modification.lookup_payload(
+            payload.get("db_profile"),
+            payload.get("hawb_no"),
+        )
+    )
+
+
+@app.post("/api/related-office/company")
+@require_login
+def related_office_company():
+    payload = request.get_json(silent=True) or {}
+    return _related_office_response(
+        lambda: related_office_modification.company_payload(
+            payload.get("db_profile"),
+            payload.get("hawb_no"),
+            payload.get("selected_job_no"),
+        )
+    )
+
+
+@app.post("/api/related-office/execute")
+@require_login
+def related_office_execute():
+    payload = request.get_json(silent=True) or {}
+    return _related_office_response(
+        lambda: related_office_modification.execute_payload(
+            payload.get("db_profile"),
+            payload.get("hawb_no"),
+            payload.get("selected_job_no"),
+            payload.get("confirmed_company_code"),
+        )
+    )
+
+
+@app.post("/api/archive-currency-invoice/lookup")
+@require_login
+def archive_currency_invoice_lookup():
+    payload = request.get_json(silent=True) or {}
+    return _interactive_tool_response(
+        lambda: archive_currency_invoice.lookup_payload(
+            payload.get("db_profile"),
+            payload.get("invoice_text"),
+        )
+    )
+
+
+@app.post("/api/archive-currency-invoice/execute")
+@require_login
+def archive_currency_invoice_execute():
+    payload = request.get_json(silent=True) or {}
+    return _interactive_tool_response(
+        lambda: archive_currency_invoice.execute_payload(
+            payload.get("db_profile"),
+            payload.get("invoice_numbers"),
+            payload.get("report_date_range"),
+        )
+    )
+
+
+@app.post("/api/ar-ap-breakdown/search")
+@require_login
+def ar_ap_breakdown_search():
+    payload = request.get_json(silent=True) or {}
+    return _interactive_tool_response(
+        lambda: ar_ap_breakdown.search_payload(
+            payload.get("db_profile"),
+            payload.get("report_type"),
+            payload.get("etd_from"),
+            payload.get("etd_to"),
+            payload.get("customer"),
+            payload.get("job_type"),
+            payload.get("billing_office"),
+        )
+    )
+
+
+@app.post("/api/ar-ap-breakdown/preview")
+@require_login
+def ar_ap_breakdown_preview():
+    payload = request.get_json(silent=True) or {}
+    return _interactive_tool_response(
+        lambda: ar_ap_breakdown.preview_payload(
+            payload.get("db_profile"),
+            payload.get("report_type"),
+            payload.get("etd_from"),
+            payload.get("etd_to"),
+            payload.get("customer"),
+            payload.get("job_type"),
+            payload.get("billing_office"),
+        )
+    )
+
+
+@app.post("/api/runs")
+@require_login
+def create_run():
+    payload = request.get_json(silent=True) or {}
+    feature_id = payload.get("feature_id", "")
+    inputs = payload.get("inputs", {})
+    try:
+        run_id = start_run(feature_id, inputs)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     return jsonify({"run_id": run_id})
 
 
-@app.post("/api/cancel/<run_id>")
+@app.post("/api/runs/<run_id>/cancel")
 @require_login
-def cancel_run_v4(run_id):
+def cancel_run_api(run_id):
     run_info = cancel_run(run_id)
     if not run_info:
         abort(404)
     return jsonify(run_info)
 
 
-@app.get("/api/status/<run_id>")
+@app.get("/api/runs/<run_id>")
 @require_login
-def run_status_v4(run_id):
+def run_status(run_id):
     run_info = get_run(run_id)
     if not run_info:
         abort(404)
@@ -190,8 +415,31 @@ def run_status_v4(run_id):
 
 @app.get("/api/runs")
 @require_login
-def runs_v4():
+def runs_api():
     return jsonify(list_runs())
+
+
+@app.post("/api/run")
+@require_login
+def create_run_v4_legacy():
+    payload = request.get_json(silent=True) or {}
+    try:
+        run_id = start_run("closing_report", {"offices": payload.get("offices", [])})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"run_id": run_id})
+
+
+@app.post("/api/cancel/<run_id>")
+@require_login
+def cancel_run_v4_legacy(run_id):
+    return cancel_run_api(run_id)
+
+
+@app.get("/api/status/<run_id>")
+@require_login
+def run_status_v4_legacy(run_id):
+    return run_status(run_id)
 
 
 @app.get("/download/<run_id>")
@@ -205,6 +453,19 @@ def download_v4(run_id):
     if not os.path.exists(run_info["zip_path"]):
         abort(404)
     return send_file(run_info["zip_path"], as_attachment=True, download_name=run_info["zip_name"])
+
+
+@app.get("/download/<run_id>/<path:filename>")
+@require_login
+def download_output(run_id, filename):
+    run_info = get_run(run_id)
+    if not run_info or run_info["status"] != "completed":
+        abort(404)
+    for output in run_info.get("outputs", []):
+        output_path = output.get("path")
+        if output.get("name") == filename and output_path and os.path.exists(output_path):
+            return send_file(output_path, as_attachment=True, download_name=filename)
+    abort(404)
 
 
 if __name__ == "__main__":

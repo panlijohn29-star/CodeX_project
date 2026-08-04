@@ -28,7 +28,7 @@ if not defined PY_CMD (
     exit /b 1
 )
 
-echo Starting Closing Report Web App V4...
+echo Starting Report Platform...
 echo Project folder: %cd%
 echo.
 
