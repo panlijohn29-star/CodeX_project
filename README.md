@@ -6,6 +6,7 @@ A Flask-based internal report platform for running accounting and operations rep
 
 - `Closing Report`: generate office closing reports as Excel files and download them as a zip package.
 - `AR/AP breakdown`: search AR, AP, or combined AR/AP charge details with filters for ETD, job type, customer, and billing office. Results support query preview, sortable columns, and CSV download.
+- `Offset Invoice`: generate AR/AP offset invoice upload workbooks from invoice numbers.
 - `Archive Currency Invoice`: verify two currency invoices and archive them after confirmation.
 - `Related Office Modification`: create related office data for a two-job HAWB after confirmation.
 
@@ -83,6 +84,7 @@ requirements.txt           Python dependencies
 - `GET /download/<run_id>/<filename>`
 - `POST /api/ar-ap-breakdown/preview`
 - `POST /api/ar-ap-breakdown/search`
+- `POST /api/offset-invoice/generate`
 - `POST /api/archive-currency-invoice/lookup`
 - `POST /api/archive-currency-invoice/execute`
 - `POST /api/related-office/lookup`
