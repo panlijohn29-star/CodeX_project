@@ -7,6 +7,7 @@ from flask import Flask, abort, jsonify, redirect, render_template, request, sen
 import features.related_office_modification as related_office_modification
 import features.archive_currency_invoice as archive_currency_invoice
 import features.ar_ap_breakdown as ar_ap_breakdown
+import features.offset_invoice as offset_invoice
 from features import get_feature, list_features
 from run_service import cancel_run, get_run, list_runs, start_run
 
@@ -382,6 +383,19 @@ def ar_ap_breakdown_preview():
     )
 
 
+@app.post("/api/offset-invoice/generate")
+@require_login
+def offset_invoice_generate():
+    payload = request.get_json(silent=True) or {}
+    return _interactive_tool_response(
+        lambda: offset_invoice.generate_payload(
+            payload.get("db_profile"),
+            payload.get("username"),
+            payload.get("invoice_text"),
+        )
+    )
+
+
 @app.post("/api/runs")
 @require_login
 def create_run():
@@ -466,6 +480,15 @@ def download_output(run_id, filename):
         if output.get("name") == filename and output_path and os.path.exists(output_path):
             return send_file(output_path, as_attachment=True, download_name=filename)
     abort(404)
+
+
+@app.get("/download/offset-invoice/<path:filename>")
+@require_login
+def download_offset_invoice(filename):
+    output_path = offset_invoice.output_path_for(filename)
+    if not output_path or not os.path.exists(output_path):
+        abort(404)
+    return send_file(output_path, as_attachment=True, download_name=filename)
 
 
 if __name__ == "__main__":
