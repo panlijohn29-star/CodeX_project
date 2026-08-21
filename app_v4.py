@@ -8,6 +8,7 @@ import features.related_office_modification as related_office_modification
 import features.archive_currency_invoice as archive_currency_invoice
 import features.ar_ap_breakdown as ar_ap_breakdown
 import features.offset_invoice as offset_invoice
+import features.sql_query as sql_query
 import features.eason_dfw_billing as eason_dfw_billing
 from features import get_feature, list_features
 from run_service import cancel_run, get_run, list_runs, start_run
@@ -36,6 +37,7 @@ def load_auth_users():
                 "password": password,
                 "enabled": enabled,
                 "favourites": [str(feature_id) for feature_id in favourites],
+                "sql_access": bool(item.get("sql_access", user_id == "admin")),
             })
     return users
 
@@ -64,6 +66,8 @@ def list_features_for_user(user_id):
     favourites = set(get_user_favourites(user_id))
     features = []
     for feature in list_features():
+        if feature["id"] == "sql_query" and not has_sql_access(user_id):
+            continue
         item = dict(feature)
         item["is_favourite"] = item["id"] in favourites
         features.append(item)
@@ -78,6 +82,26 @@ def group_features_by_category(features):
 
 def is_admin_user():
     return session.get("user_id") == "admin"
+
+
+def has_sql_access(user_id=None):
+    user = get_auth_user(user_id or session.get("user_id", ""))
+    return bool(user and user.get("sql_access", user.get("user_id") == "admin"))
+
+
+def require_sql_access(view_func):
+    @wraps(view_func)
+    def wrapper(*args, **kwargs):
+        if not has_sql_access():
+            return jsonify({"error": "SQL Query access is not enabled for this account"}), 403
+        return view_func(*args, **kwargs)
+    return wrapper
+
+
+def can_access_sql_run(run_info):
+    if not run_info or run_info.get("feature_id") != "sql_query":
+        return True
+    return run_info.get("inputs", {}).get("owner_user_id") == session.get("user_id")
 
 
 def require_login(view_func):
@@ -134,6 +158,8 @@ def feature_page(feature_id):
     feature = get_feature(feature_id)
     if not feature:
         abort(404)
+    if feature_id == "sql_query" and not has_sql_access():
+        abort(403)
     if feature.get("template"):
         return render_template(
             feature["template"],
@@ -144,6 +170,7 @@ def feature_page(feature_id):
                 "description": feature["description"],
             },
             db_profiles=feature.get("db_profiles", related_office_modification.ALLOWED_DB_PROFILES),
+            sql_profiles=sql_query.discover_db_profiles() if feature["id"] == "sql_query" else [],
             user_id=session.get("user_id", "admin"),
         )
     return render_template(
@@ -207,7 +234,7 @@ def create_account():
     if any(user["user_id"] == user_id for user in users):
         return jsonify({"error": "User already exists"}), 400
 
-    users.append({"user_id": user_id, "password": password, "enabled": enabled, "favourites": []})
+    users.append({"user_id": user_id, "password": password, "enabled": enabled, "favourites": [], "sql_access": False})
     save_auth_users(users)
     return jsonify({"ok": True, "users": users})
 
@@ -231,6 +258,23 @@ def toggle_account():
             save_auth_users(users)
             return jsonify({"ok": True, "users": users})
 
+    return jsonify({"error": "User not found"}), 404
+
+
+@app.post("/api/account/sql-access")
+@require_login
+def toggle_sql_access():
+    if not is_admin_user():
+        return jsonify({"error": "Admin only"}), 403
+    payload = request.get_json(silent=True) or {}
+    user_id = payload.get("user_id", "").strip()
+    enabled = bool(payload.get("enabled", False))
+    users = load_auth_users()
+    for user in users:
+        if user["user_id"] == user_id:
+            user["sql_access"] = enabled
+            save_auth_users(users)
+            return jsonify({"ok": True, "users": users})
     return jsonify({"error": "User not found"}), 404
 
 
@@ -420,12 +464,126 @@ def eason_dfw_billing_generate():
         return jsonify({"error": str(exc)}), 500
 
 
+@app.post("/api/sql-query/runs")
+@require_login
+@require_sql_access
+def sql_query_start():
+    payload = request.get_json(silent=True) or {}
+    try:
+        run_id = start_run("sql_query", {
+            "db_profile": payload.get("db_profile"),
+            "sql": payload.get("sql"),
+            "owner_user_id": session.get("user_id", ""),
+        })
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"run_id": run_id})
+
+
+@app.get("/api/sql-query/runs/<run_id>")
+@require_login
+@require_sql_access
+def sql_query_status(run_id):
+    run_info = get_run(run_id)
+    if not run_info or run_info.get("feature_id") != "sql_query":
+        abort(404)
+    if not can_access_sql_run(run_info):
+        abort(403)
+    return jsonify(run_info)
+
+
+@app.post("/api/sql-query/runs/<run_id>/cancel")
+@require_login
+@require_sql_access
+def sql_query_cancel(run_id):
+    run_info = get_run(run_id)
+    if not run_info or run_info.get("feature_id") != "sql_query":
+        abort(404)
+    if not can_access_sql_run(run_info):
+        abort(403)
+    updated = cancel_run(run_id)
+    if updated.get("cancellation_error"):
+        return jsonify({"error": updated["cancellation_error"]}), 400
+    return jsonify(updated)
+
+
+@app.get("/api/sql-query/scripts")
+@require_login
+@require_sql_access
+def sql_query_list_scripts():
+    return jsonify(sql_query.list_scripts(session.get("user_id", "")))
+
+
+@app.get("/api/sql-query/scripts/<path:name>")
+@require_login
+@require_sql_access
+def sql_query_load_script(name):
+    return _interactive_tool_response(lambda: sql_query.load_script(session.get("user_id", ""), name))
+
+
+@app.post("/api/sql-query/scripts")
+@require_login
+@require_sql_access
+def sql_query_save_script():
+    payload = request.get_json(silent=True) or {}
+    return _interactive_tool_response(lambda: sql_query.save_script(
+        session.get("user_id", ""), payload.get("name"), payload.get("sql"), bool(payload.get("overwrite")),
+    ))
+
+
+@app.delete("/api/sql-query/scripts/<path:name>")
+@require_login
+@require_sql_access
+def sql_query_delete_script(name):
+    return _interactive_tool_response(lambda: sql_query.delete_script(session.get("user_id", ""), name))
+
+
+@app.post("/api/sql-query/folders")
+@require_login
+@require_sql_access
+def sql_query_create_folder():
+    payload = request.get_json(silent=True) or {}
+    return _interactive_tool_response(lambda: sql_query.create_folder(session.get("user_id", ""), payload.get("path")))
+
+
+@app.delete("/api/sql-query/folders/<path:folder_path>")
+@require_login
+@require_sql_access
+def sql_query_delete_folder(folder_path):
+    return _interactive_tool_response(lambda: sql_query.delete_folder(session.get("user_id", ""), folder_path))
+
+
+@app.post("/api/sql-query/scripts/upload")
+@require_login
+@require_sql_access
+def sql_query_upload_script():
+    uploaded_files = request.files.getlist("files") or request.files.getlist("file")
+    uploaded_files = [item for item in uploaded_files if item and item.filename]
+    if not uploaded_files:
+        return jsonify({"error": "Please select a .sql file"}), 400
+    scripts = []
+    for uploaded in uploaded_files:
+        if not uploaded.filename.lower().endswith(".sql"):
+            return jsonify({"error": "Only .sql files can be uploaded"}), 400
+        content = uploaded.read(sql_query.MAX_SCRIPT_BYTES + 1)
+        if len(content) > sql_query.MAX_SCRIPT_BYTES:
+            return jsonify({"error": "Script exceeds the 1 MB limit"}), 400
+        try:
+            sql = content.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            return jsonify({"error": "SQL file must be UTF-8 encoded"}), 400
+        scripts.append({"name": sql_query.normalize_script_name(uploaded.filename), "sql": sql})
+    return jsonify({"scripts": scripts})
+
+
 @app.post("/api/runs")
 @require_login
 def create_run():
     payload = request.get_json(silent=True) or {}
     feature_id = payload.get("feature_id", "")
     inputs = payload.get("inputs", {})
+    if feature_id == "sql_query":
+        return jsonify({"error": "Use the SQL Query endpoint"}), 400
     try:
         run_id = start_run(feature_id, inputs)
     except ValueError as exc:
@@ -436,6 +594,9 @@ def create_run():
 @app.post("/api/runs/<run_id>/cancel")
 @require_login
 def cancel_run_api(run_id):
+    run_info = get_run(run_id)
+    if run_info and not can_access_sql_run(run_info):
+        abort(403)
     run_info = cancel_run(run_id)
     if not run_info:
         abort(404)
@@ -448,13 +609,15 @@ def run_status(run_id):
     run_info = get_run(run_id)
     if not run_info:
         abort(404)
+    if not can_access_sql_run(run_info):
+        abort(403)
     return jsonify(run_info)
 
 
 @app.get("/api/runs")
 @require_login
 def runs_api():
-    return jsonify(list_runs())
+    return jsonify([run for run in list_runs() if can_access_sql_run(run)])
 
 
 @app.post("/api/run")
@@ -486,6 +649,8 @@ def download_v4(run_id):
     run_info = get_run(run_id)
     if not run_info:
         abort(404)
+    if not can_access_sql_run(run_info):
+        abort(403)
     if run_info["status"] != "completed" or not run_info.get("zip_path"):
         abort(404)
     if not os.path.exists(run_info["zip_path"]):
@@ -499,6 +664,8 @@ def download_output(run_id, filename):
     run_info = get_run(run_id)
     if not run_info or run_info["status"] != "completed":
         abort(404)
+    if not can_access_sql_run(run_info):
+        abort(403)
     for output in run_info.get("outputs", []):
         output_path = output.get("path")
         if output.get("name") == filename and output_path and os.path.exists(output_path):

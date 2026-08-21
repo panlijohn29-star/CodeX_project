@@ -1,0 +1,7 @@
+.CodeMirror { position: relative; min-height: 300px; border: 1px solid #d8dee6; border-radius: 6px; background: #fbfcfd; overflow: hidden; font: 14px/1.5 Consolas, "Courier New", monospace; }
+.CodeMirror pre, .CodeMirror textarea { margin: 0; padding: 12px; border: 0; width: 100%; min-height: 300px; tab-size: 2; white-space: pre; overflow-wrap: normal; }
+.CodeMirror pre { pointer-events: none; color: #17202a; }
+.CodeMirror textarea { position: absolute; inset: 0; resize: vertical; background: transparent; color: transparent; caret-color: #17202a; outline: none; }
+.CodeMirror:focus-within pre { visibility: hidden; }
+.CodeMirror:focus-within textarea { color: #17202a; }
+.cm-keyword { color: #7b2cbf; font-weight: 700; }.cm-string { color: #0a6b32; }.cm-comment { color: #6c757d; font-style: italic; }.cm-number { color: #b45309; }

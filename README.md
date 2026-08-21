@@ -9,6 +9,7 @@ A Flask-based internal report platform for running accounting and operations rep
 - `Offset Invoice`: generate AR/AP offset invoice upload workbooks from invoice numbers.
 - `Archive Currency Invoice`: verify two currency invoices and archive them after confirmation.
 - `Related Office Modification`: create related office data for a two-job HAWB after confirmation.
+- `SQL Query`: approved users can run SQL, terminate active queries, export result sets to Excel, and save private `.sql` scripts.
 
 ## Requirements
 
@@ -37,6 +38,8 @@ SCDBCA_DATABASE=scdbca
 
 You can also override each database profile separately with `SCDBUS_HOST`, `SCDBUS_USER`, `SCDBUS_PASSWORD`, `SCDBUS_PORT`, `SCDBCA_HOST`, `SCDBCA_USER`, `SCDBCA_PASSWORD`, and `SCDBCA_PORT`.
 
+`SQL Query` discovers each valid `*_DATABASE` or `*_DB` profile. Submitted SQL runs with the configured MySQL account's privileges; terminating a query requires MySQL `KILL QUERY` permission. Query results and private scripts are stored in the ignored `reports_v4/` runtime directory. An administrator enables SQL access per account from the dashboard.
+
 ## Run
 
 ```powershell
@@ -60,7 +63,7 @@ ID: admin
 Password: admin88
 ```
 
-Admin users can add users and enable or disable non-admin accounts from the dashboard. Any logged-in user can change their own password.
+Admin users can add users, enable or disable non-admin accounts, and grant SQL Query access from the dashboard. Any logged-in user can change their own password.
 
 ## Project Structure
 

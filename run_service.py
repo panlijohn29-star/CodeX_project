@@ -206,6 +206,7 @@ def _execute_run(run_id):
             outputs=result.get("outputs", []),
             zip_name=result.get("zip_name"),
             zip_path=result.get("zip_path"),
+            result=result.get("result"),
         )
     except Exception as exc:
         current = get_run(run_id)
@@ -236,8 +237,13 @@ def cancel_run(run_id):
     if feature and feature.get("cancel"):
         try:
             feature["cancel"](run_info)
-        except Exception:
-            pass
+        except Exception as exc:
+            return update_run(
+                run_id,
+                status="running",
+                message="Cancellation could not be completed: {0}".format(exc),
+                cancellation_error=str(exc),
+            )
     if finished:
         return run_snapshot
     return update_run(run_id, status="cancelling", message="Cancellation requested")

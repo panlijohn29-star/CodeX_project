@@ -3,12 +3,18 @@
     {
       "user_id": "admin",
       "password": "admin88",
-      "enabled": true
+      "enabled": true,
+      "favourites": [],
+      "sql_access": true
     },
     {
       "user_id": "panlijohn",
       "password": "Johnpanli28",
-      "enabled": true
+      "enabled": true,
+      "favourites": [
+        "sql_query"
+      ],
+      "sql_access": true
     }
   ]
 }
