@@ -8,6 +8,7 @@ import features.related_office_modification as related_office_modification
 import features.archive_currency_invoice as archive_currency_invoice
 import features.ar_ap_breakdown as ar_ap_breakdown
 import features.offset_invoice as offset_invoice
+import features.eason_dfw_billing as eason_dfw_billing
 from features import get_feature, list_features
 from run_service import cancel_run, get_run, list_runs, start_run
 
@@ -396,6 +397,29 @@ def offset_invoice_generate():
     )
 
 
+@app.get("/api/eason-dfw-billing/mappings")
+@require_login
+def eason_dfw_billing_mappings():
+    return _interactive_tool_response(eason_dfw_billing.mappings_payload)
+
+
+@app.post("/api/eason-dfw-billing/generate")
+@require_login
+def eason_dfw_billing_generate():
+    try:
+        return jsonify(eason_dfw_billing.generate_payload(
+            request.files.get("workbook"),
+            request.form.get("accounts_text"),
+            request.form.get("charges_text"),
+        ))
+    except eason_dfw_billing.AuditError as exc:
+        return jsonify({"error": str(exc), "issues": exc.issues}), 400
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
 @app.post("/api/runs")
 @require_login
 def create_run():
@@ -487,6 +511,15 @@ def download_output(run_id, filename):
 def download_offset_invoice(filename):
     output_path = offset_invoice.output_path_for(filename)
     if not output_path or not os.path.exists(output_path):
+        abort(404)
+    return send_file(output_path, as_attachment=True, download_name=filename)
+
+
+@app.get("/download/eason-dfw-billing/<path:filename>")
+@require_login
+def download_eason_dfw_billing(filename):
+    output_path = eason_dfw_billing.output_path_for(filename)
+    if not output_path or not output_path.exists():
         abort(404)
     return send_file(output_path, as_attachment=True, download_name=filename)
 

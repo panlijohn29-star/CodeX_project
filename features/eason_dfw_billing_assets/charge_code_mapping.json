@@ -1,0 +1,52 @@
+{
+  "ABC": {
+    "Charge Code": 6002,
+    "CHARGE_CATEGORY": "Warehouse",
+    "CHARGE_LOCAL_NAME": "Warehouse Fee"
+  },
+  "ATC": {
+    "Charge Code": 7503,
+    "CHARGE_CATEGORY": "Local Charges",
+    "CHARGE_LOCAL_NAME": "Airport Transfer Charge"
+  },
+  "CUSTOMS": {
+    "Charge Code": 7000,
+    "CHARGE_CATEGORY": "Customs Brokerage",
+    "CHARGE_LOCAL_NAME": "Customs Clearance Charge"
+  },
+  "DELIVERY": {
+    "Charge Code": 8000,
+    "CHARGE_CATEGORY": "Trucking",
+    "CHARGE_LOCAL_NAME": "Delivery"
+  },
+  "GPS": {
+    "Charge Code": 8000,
+    "CHARGE_CATEGORY": "Trucking",
+    "CHARGE_LOCAL_NAME": "GPS"
+  },
+  "HANDLING": {
+    "Charge Code": 7500,
+    "CHARGE_CATEGORY": "Local Charges",
+    "CHARGE_LOCAL_NAME": "Handling Charges"
+  },
+  "IT/IE": {
+    "Charge Code": 7085,
+    "CHARGE_CATEGORY": "Customs Brokerage",
+    "CHARGE_LOCAL_NAME": "I.T./I.E. Fee"
+  },
+  "STRAPPING FEE": {
+    "Charge Code": 6005,
+    "CHARGE_CATEGORY": "Warehouse",
+    "CHARGE_LOCAL_NAME": "Strapping Fee"
+  },
+  "THC": {
+    "Charge Code": 6000,
+    "CHARGE_CATEGORY": "Local Charges",
+    "CHARGE_LOCAL_NAME": "THC"
+  },
+  "WAREHOUSE SERVICE AT DEST": {
+    "Charge Code": 6002,
+    "CHARGE_CATEGORY": "Warehouse",
+    "CHARGE_LOCAL_NAME": "Warehouse Service"
+  }
+}
