@@ -183,6 +183,17 @@ def _calculate_atc(rule, package_type, cw):
     return _number(amount.quantize(Decimal("0.01")))
 
 
+def _calculate_weight_based_charge(rule, cw):
+    if rule in (None, "") or isinstance(rule, (int, float, Decimal)):
+        return _number(rule)
+    if cw in (None, ""):
+        return rule
+    match = re.search(r"(\d+(?:\.\d+)?)\s*/\s*KG", str(rule).strip().upper().replace("$", ""))
+    if not match:
+        return rule
+    return _number((Decimal(match.group(1)) * _decimal(cw)).quantize(Decimal("0.01")))
+
+
 def _handling(rule, customer, mawb, seen):
     if rule is None:
         return None
@@ -298,7 +309,7 @@ def _output_rows(processed, charge_map):
     rows = []
     for row in processed.iter_rows(min_row=2, values_only=True):
         for column in charge_columns:
-            value = _calculate_atc(row[index["ATC"]], row[index["PACKAGE_TYPE"]], row[index["CW"]]) if column == "ATC" else _numeric_text(row[index[column]])
+            value = _calculate_atc(row[index["ATC"]], row[index["PACKAGE_TYPE"]], row[index["CW"]]) if column == "ATC" else _calculate_weight_based_charge(row[index[column]], row[index["CW"]])
             if value in (None, "", 0): continue
             mapping = charge_map[column.upper()]
             account, hbl = row[index["Billing Party"]], row[index["HBL_NO"]]
@@ -357,6 +368,10 @@ def _audit_rows(rows, do_rows, nodo_rows):
                 issues.append("Converted row {0} has an invalid Charge Code.".format(index))
         except (TypeError, ValueError):
             issues.append("Converted row {0} has an invalid Charge Code.".format(index))
+        try:
+            Decimal(str(row["Unit Price"]))
+        except (TypeError, ValueError, ArithmeticError):
+            issues.append("Converted row {0} has a non-numeric Unit Price.".format(index))
     return issues
 
 
