@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Feature Management | Report Platform</title>
+  <style>
+    :root { --bg:#f6f7f9; --surface:#fff; --ink:#17202a; --muted:#607080; --line:#d8dee6; --accent:#145a7a; --ok:#2e6b3a; --off:#8a3b22; }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family:Arial,Helvetica,sans-serif; background:var(--bg); color:var(--ink); }
+    a { color:var(--accent); text-decoration:none; } a:hover { text-decoration:underline; }
+    .shell { max-width:980px; margin:0 auto; padding:24px 20px 44px; }
+    .topbar { display:flex; justify-content:space-between; align-items:center; gap:16px; padding-bottom:20px; border-bottom:1px solid var(--line); }
+    h1 { margin:0; font-size:28px; } h2 { margin:26px 0 12px; font-size:19px; }
+    .muted,.status { color:var(--muted); font-size:14px; line-height:1.45; }
+    .note { margin-top:14px; padding:12px; border:1px solid #cfe0e8; border-radius:8px; background:#f1f8fb; font-size:14px; line-height:1.45; }
+    .list { display:grid; gap:10px; }
+    .row { display:grid; grid-template-columns:minmax(0,1fr) auto auto; align-items:center; gap:14px; padding:14px; border:1px solid var(--line); border-radius:8px; background:var(--surface); }
+    .title { font-weight:700; } .detail { margin-top:4px; color:var(--muted); font-size:13px; }
+    .original-title { margin-top:4px; color:var(--muted); font-size:12px; }.remark { margin-top:7px; color:#405568; font-size:13px; white-space:pre-wrap; }
+    .badge { display:inline-block; margin-top:8px; padding:3px 7px; border-radius:999px; background:#e0f1e4; color:var(--ok); font-size:12px; font-weight:700; }
+    .badge.inactive { background:#f9dfd7; color:var(--off); }
+    .actions { display:flex; gap:8px; }
+    button { border:0; border-radius:6px; background:var(--accent); color:#fff; padding:9px 11px; cursor:pointer; font-size:13px; font-weight:700; }
+    button.secondary { background:#607080; } button.off { background:var(--off); } button:disabled { opacity:.45; cursor:not-allowed; }
+    .details-form { display:none; grid-column:1 / -1; grid-template-columns:minmax(220px,.8fr) minmax(260px,1.2fr) auto; gap:12px; align-items:end; margin-top:12px; padding-top:12px; border-top:1px solid var(--line); }.details-form.open { display:grid; }.field { display:grid; gap:6px; font-size:13px; font-weight:700; }.field input,.field textarea { width:100%; border:1px solid var(--line); border-radius:6px; padding:9px 10px; font:14px Arial,Helvetica,sans-serif; }.field textarea { min-height:70px; resize:vertical; }.form-actions { display:flex; gap:8px; }
+    @media (max-width:680px) { .topbar { align-items:flex-start; flex-direction:column; } .row { grid-template-columns:1fr; gap:10px; }.details-form { grid-template-columns:1fr; }.form-actions { justify-content:flex-end; } }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div><div class="muted"><a href="/">Report Platform</a> / Administration</div><h1>Feature Management</h1></div>
+      <div class="muted">Signed in as {{ user_id }} | <a href="/logout">Log out</a></div>
+    </header>
+    <div class="note">Control which reports and tools are visible and usable. Inactive features are hidden from users and their feature page and API endpoints are unavailable. Use the arrows to set the display order within each category. You can also set a display name and an internal administrator remark.</div>
+    <div id="status" class="status" style="margin-top:12px">Ready</div>
+    <div id="featureRoot"></div>
+  </main>
+  <script>
+    let features = {{ features|tojson }};
+    const root = document.getElementById("featureRoot");
+    const status = document.getElementById("status");
+    const escapeHtml = (text) => String(text ?? "").replace(/[&<>"']/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[char]));
+
+    function render() {
+      const categories = [...new Set(features.map((item) => item.category))];
+      root.innerHTML = categories.map((category) => {
+        const rows = features.filter((item) => item.category === category);
+        return `<section><h2>${escapeHtml(category)}</h2><div class="list">${rows.map((feature, index) => `
+          <div class="row">
+            <div><div class="title">${escapeHtml(feature.title)}</div>${feature.original_title && feature.title !== feature.original_title ? `<div class="original-title">Original: ${escapeHtml(feature.original_title)}</div>` : ""}<div class="detail">${escapeHtml(feature.description)}</div>${feature.remark ? `<div class="remark">${escapeHtml(feature.remark)}</div>` : ""}<span class="badge${feature.active ? "" : " inactive"}">${feature.active ? "Active" : "Inactive"}</span></div>
+            <div class="actions"><button class="secondary edit" data-id="${escapeHtml(feature.id)}">Edit</button><button class="secondary move" data-id="${escapeHtml(feature.id)}" data-direction="up" ${index === 0 ? "disabled" : ""} aria-label="Move ${escapeHtml(feature.title)} up">↑</button><button class="secondary move" data-id="${escapeHtml(feature.id)}" data-direction="down" ${index === rows.length - 1 ? "disabled" : ""} aria-label="Move ${escapeHtml(feature.title)} down">↓</button></div>
+            <button class="toggle ${feature.active ? "off" : ""}" data-id="${escapeHtml(feature.id)}" data-active="${feature.active ? "false" : "true"}">${feature.active ? "Deactivate" : "Activate"}</button>
+            <div class="details-form" id="details-${escapeHtml(feature.id)}"><label class="field">Display name<input class="display-name" value="${escapeHtml(feature.title)}" maxlength="100"></label><label class="field">Admin remark<textarea class="feature-remark" maxlength="1000" placeholder="Internal note for administrators only">${escapeHtml(feature.remark)}</textarea></label><div class="form-actions"><button class="secondary cancel-edit" data-id="${escapeHtml(feature.id)}">Cancel</button><button class="save-details" data-id="${escapeHtml(feature.id)}">Save</button></div></div>
+          </div>`).join("")}</div></section>`;
+      }).join("");
+      root.querySelectorAll(".toggle").forEach((button) => button.addEventListener("click", () => update(button.dataset.id, "toggle", { active: button.dataset.active === "true" })));
+      root.querySelectorAll(".move").forEach((button) => button.addEventListener("click", () => update(button.dataset.id, "move", { direction: button.dataset.direction })));
+      root.querySelectorAll(".edit").forEach((button) => button.addEventListener("click", () => document.getElementById(`details-${button.dataset.id}`).classList.add("open")));
+      root.querySelectorAll(".cancel-edit").forEach((button) => button.addEventListener("click", () => document.getElementById(`details-${button.dataset.id}`).classList.remove("open")));
+      root.querySelectorAll(".save-details").forEach((button) => button.addEventListener("click", () => {
+        const form = document.getElementById(`details-${button.dataset.id}`);
+        update(button.dataset.id, "details", { title: form.querySelector(".display-name").value, remark: form.querySelector(".feature-remark").value });
+      }));
+    }
+
+    async function update(featureId, action, body) {
+      status.textContent = "Saving...";
+      const response = await fetch(`/api/feature-management/${encodeURIComponent(featureId)}/${action}`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body) });
+      const payload = await response.json();
+      if (!response.ok) { status.textContent = payload.error || "Unable to update feature"; return; }
+      features = payload.features;
+      status.textContent = "Saved";
+      render();
+    }
+    render();
+  </script>
+</body>
+</html>

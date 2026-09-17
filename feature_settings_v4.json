@@ -1,0 +1,50 @@
+{
+  "closing_report": {
+    "active": true,
+    "sort_order": 0,
+    "title": "Closing Report",
+    "remark": ""
+  },
+  "ar_ap_breakdown": {
+    "active": false,
+    "sort_order": 1,
+    "title": "AR/AP breakdown",
+    "remark": ""
+  },
+  "offset_invoice": {
+    "active": true,
+    "sort_order": 2,
+    "title": "Offset Invoice",
+    "remark": ""
+  },
+  "archive_currency_invoice": {
+    "active": true,
+    "sort_order": 3,
+    "title": "Archive Currency Invoice",
+    "remark": ""
+  },
+  "related_office_modification": {
+    "active": true,
+    "sort_order": 4,
+    "title": "Related Office Modification",
+    "remark": ""
+  },
+  "sql_query": {
+    "active": true,
+    "sort_order": 5,
+    "title": "SQL Query",
+    "remark": ""
+  },
+  "eason_dfw_billing": {
+    "active": true,
+    "sort_order": 6,
+    "title": "Eason_DFW_Billing",
+    "remark": ""
+  },
+  "eason_client_report": {
+    "active": true,
+    "sort_order": 7,
+    "title": "Charges/Cost Detail Report",
+    "remark": ""
+  }
+}

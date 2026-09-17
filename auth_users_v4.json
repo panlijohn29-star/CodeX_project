@@ -5,7 +5,8 @@
       "password": "admin88",
       "enabled": true,
       "favourites": [],
-      "sql_access": true
+      "sql_access": true,
+      "feature_management": true
     },
     {
       "user_id": "panlijohn",
@@ -14,7 +15,8 @@
       "favourites": [
         "sql_query"
       ],
-      "sql_access": true
+      "sql_access": true,
+      "feature_management": true
     }
   ]
 }

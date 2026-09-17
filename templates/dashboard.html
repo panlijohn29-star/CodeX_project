@@ -98,10 +98,25 @@
     }
     .empty-state, .account-list { display: grid; gap: 10px; }
     .account-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 14px;
       border: 1px solid var(--line);
       border-radius: 8px;
       padding: 12px;
       background: #fff;
+    }
+    .account-actions {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+    .account-actions button {
+      min-height: 36px;
+      padding: 8px 10px;
+      white-space: nowrap;
     }
     .row {
       display: flex;
@@ -135,6 +150,10 @@
       .grid, .account-grid { grid-template-columns: 1fr; }
       .topbar { align-items: flex-start; flex-direction: column; }
     }
+    @media (max-width: 580px) {
+      .account-row { grid-template-columns: 1fr; align-items: flex-start; }
+      .account-actions { justify-content: flex-start; }
+    }
   </style>
 </head>
 <body>
@@ -144,7 +163,7 @@
         <h1>Report Platform</h1>
         <div class="muted">Reports and internal tools run from one shared task center.</div>
       </div>
-      <div class="muted">Signed in as {{ user_id }} | <a href="/logout">Log out</a></div>
+      <div class="muted">Signed in as {{ user_id }}{% if can_manage_features %} | <a href="/management/features">Feature Management</a>{% endif %} | <a href="/logout">Log out</a></div>
     </header>
 
     <div class="grid">
@@ -279,9 +298,9 @@
           <div class="account-row row">
             <div>
               <strong>${escapeHtml(user.user_id)}</strong>
-              <div class="meta">${enabledLabel}${user.sql_access ? ' · SQL access' : ''}</div>
+              <div class="meta">${enabledLabel}${user.sql_access ? ' · SQL access' : ''}${user.feature_management ? ' · Feature management' : ''}</div>
             </div>
-            <div>${toggleButton} ${isAdmin ? `<button type="button" class="secondary sql-access-btn" data-user-id="${escapeHtml(user.user_id)}" data-sql-access="${user.sql_access ? 'false' : 'true'}">${user.sql_access ? 'Remove SQL' : 'Allow SQL'}</button>` : ''}</div>
+            <div class="account-actions">${toggleButton} ${isAdmin ? `<button type="button" class="secondary sql-access-btn" data-user-id="${escapeHtml(user.user_id)}" data-sql-access="${user.sql_access ? 'false' : 'true'}">${user.sql_access ? 'Remove SQL' : 'Allow SQL'}</button> <button type="button" class="secondary feature-management-btn" data-user-id="${escapeHtml(user.user_id)}" data-feature-management="${user.feature_management ? 'false' : 'true'}">${user.feature_management ? 'Remove management' : 'Allow management'}</button>` : ''}</div>
           </div>
         `;
       }).join("");
@@ -317,6 +336,19 @@
             if (!response.ok) { accountState.textContent = payload.error || "Unable to update SQL access"; return; }
             authUsers = payload.users;
             accountState.textContent = "Updated SQL access";
+            renderAccounts();
+          });
+        });
+        accountList.querySelectorAll(".feature-management-btn").forEach((button) => {
+          button.addEventListener("click", async () => {
+            const response = await fetch("/api/account/feature-management", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ user_id: button.getAttribute("data-user-id"), enabled: button.getAttribute("data-feature-management") === "true" })
+            });
+            const payload = await response.json();
+            if (!response.ok) { accountState.textContent = payload.error || "Unable to update management access"; return; }
+            authUsers = payload.users;
+            accountState.textContent = "Updated feature management access";
             renderAccounts();
           });
         });

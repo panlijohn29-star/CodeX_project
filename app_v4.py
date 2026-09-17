@@ -19,6 +19,7 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "report-platform-secret")
 
 AUTH_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "auth_users_v4.json")
+FEATURE_SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "feature_settings_v4.json")
 
 
 def load_auth_users():
@@ -39,6 +40,7 @@ def load_auth_users():
                 "enabled": enabled,
                 "favourites": [str(feature_id) for feature_id in favourites],
                 "sql_access": bool(item.get("sql_access", user_id == "admin")),
+                "feature_management": bool(item.get("feature_management", user_id == "admin")),
             })
     return users
 
@@ -63,16 +65,81 @@ def get_user_favourites(user_id):
     return auth_user.get("favourites", [])
 
 
+def _default_feature_settings():
+    return {
+        feature["id"]: {
+            "active": True,
+            "sort_order": index,
+            "title": feature["title"],
+            "remark": "",
+        }
+        for index, feature in enumerate(list_features())
+    }
+
+
+def load_feature_settings():
+    defaults = _default_feature_settings()
+    try:
+        with open(FEATURE_SETTINGS_PATH, "r", encoding="utf-8") as handle:
+            saved = json.load(handle)
+    except (FileNotFoundError, json.JSONDecodeError):
+        saved = {}
+
+    if not isinstance(saved, dict):
+        saved = {}
+    for feature_id, default in defaults.items():
+        value = saved.get(feature_id, {})
+        if not isinstance(value, dict):
+            value = {}
+        default["active"] = bool(value.get("active", True))
+        sort_order = value.get("sort_order", default["sort_order"])
+        default["sort_order"] = sort_order if isinstance(sort_order, int) else default["sort_order"]
+        title = value.get("title", default["title"])
+        default["title"] = title.strip() if isinstance(title, str) and title.strip() else default["title"]
+        remark = value.get("remark", "")
+        default["remark"] = remark.strip() if isinstance(remark, str) else ""
+    return defaults
+
+
+def save_feature_settings(settings):
+    with open(FEATURE_SETTINGS_PATH, "w", encoding="utf-8") as handle:
+        json.dump(settings, handle, ensure_ascii=True, indent=2)
+
+
+def is_feature_active(feature_id):
+    return bool(load_feature_settings().get(feature_id, {}).get("active", False))
+
+
+def feature_management_payload():
+    settings = load_feature_settings()
+    return sorted([
+        {
+            **feature,
+            "original_title": feature["title"],
+            "title": settings[feature["id"]]["title"],
+            "remark": settings[feature["id"]]["remark"],
+            "active": settings[feature["id"]]["active"],
+            "sort_order": settings[feature["id"]]["sort_order"],
+        }
+        for feature in list_features()
+    ], key=lambda item: (item["category"].lower(), item["sort_order"], item["title"].lower()))
+
+
 def list_features_for_user(user_id):
     favourites = set(get_user_favourites(user_id))
     features = []
+    settings = load_feature_settings()
     for feature in list_features():
+        if not settings[feature["id"]]["active"]:
+            continue
         if feature["id"] == "sql_query" and not has_sql_access(user_id):
             continue
         item = dict(feature)
+        item["title"] = settings[item["id"]]["title"]
         item["is_favourite"] = item["id"] in favourites
+        item["sort_order"] = settings[item["id"]]["sort_order"]
         features.append(item)
-    return sorted(features, key=lambda item: (not item["is_favourite"], item["title"].lower()))
+    return sorted(features, key=lambda item: (item["category"].lower(), item["sort_order"], item["title"].lower()))
 
 
 def group_features_by_category(features):
@@ -83,6 +150,44 @@ def group_features_by_category(features):
 
 def is_admin_user():
     return session.get("user_id") == "admin"
+
+
+def can_manage_features():
+    user = get_auth_user(session.get("user_id", ""))
+    return bool(user and user.get("feature_management", False))
+
+
+FEATURE_ENDPOINTS = {
+    "related_office_lookup": "related_office_modification",
+    "related_office_company": "related_office_modification",
+    "related_office_execute": "related_office_modification",
+    "archive_currency_invoice_lookup": "archive_currency_invoice",
+    "archive_currency_invoice_execute": "archive_currency_invoice",
+    "ar_ap_breakdown_search": "ar_ap_breakdown",
+    "ar_ap_breakdown_preview": "ar_ap_breakdown",
+    "offset_invoice_generate": "offset_invoice",
+    "eason_dfw_billing_mappings": "eason_dfw_billing",
+    "eason_dfw_billing_generate": "eason_dfw_billing",
+    "eason_client_report_search": "eason_client_report",
+    "eason_client_report_preview": "eason_client_report",
+    "sql_query_start": "sql_query",
+    "sql_query_status": "sql_query",
+    "sql_query_cancel": "sql_query",
+    "sql_query_list_scripts": "sql_query",
+    "sql_query_load_script": "sql_query",
+    "sql_query_save_script": "sql_query",
+    "sql_query_delete_script": "sql_query",
+    "sql_query_create_folder": "sql_query",
+    "sql_query_delete_folder": "sql_query",
+    "sql_query_upload_script": "sql_query",
+}
+
+
+@app.before_request
+def block_inactive_feature_endpoints():
+    feature_id = FEATURE_ENDPOINTS.get(request.endpoint)
+    if feature_id and session.get("authenticated") and not is_feature_active(feature_id):
+        abort(404)
 
 
 def has_sql_access(user_id=None):
@@ -112,6 +217,15 @@ def require_login(view_func):
             if request.path.startswith("/api/"):
                 return jsonify({"error": "Unauthorized"}), 401
             return redirect(url_for("login"))
+        return view_func(*args, **kwargs)
+    return wrapper
+
+
+def require_feature_management(view_func):
+    @wraps(view_func)
+    def wrapper(*args, **kwargs):
+        if not can_manage_features():
+            return jsonify({"error": "Feature management access is not enabled for this account"}), 403
         return view_func(*args, **kwargs)
     return wrapper
 
@@ -150,6 +264,7 @@ def index_v4():
         user_id=user_id,
         auth_users=load_auth_users(),
         is_admin=is_admin_user(),
+        can_manage_features=can_manage_features(),
     )
 
 
@@ -157,8 +272,10 @@ def index_v4():
 @require_login
 def feature_page(feature_id):
     feature = get_feature(feature_id)
-    if not feature:
+    if not feature or not is_feature_active(feature_id):
         abort(404)
+    feature = dict(feature)
+    feature["title"] = load_feature_settings()[feature_id]["title"]
     if feature_id == "sql_query" and not has_sql_access():
         abort(403)
     if feature.get("template"):
@@ -235,7 +352,7 @@ def create_account():
     if any(user["user_id"] == user_id for user in users):
         return jsonify({"error": "User already exists"}), 400
 
-    users.append({"user_id": user_id, "password": password, "enabled": enabled, "favourites": [], "sql_access": False})
+    users.append({"user_id": user_id, "password": password, "enabled": enabled, "favourites": [], "sql_access": False, "feature_management": False})
     save_auth_users(users)
     return jsonify({"ok": True, "users": users})
 
@@ -279,6 +396,23 @@ def toggle_sql_access():
     return jsonify({"error": "User not found"}), 404
 
 
+@app.post("/api/account/feature-management")
+@require_login
+def toggle_feature_management_access():
+    if not is_admin_user():
+        return jsonify({"error": "Admin only"}), 403
+    payload = request.get_json(silent=True) or {}
+    user_id = payload.get("user_id", "").strip()
+    enabled = bool(payload.get("enabled", False))
+    users = load_auth_users()
+    for user in users:
+        if user["user_id"] == user_id:
+            user["feature_management"] = enabled
+            save_auth_users(users)
+            return jsonify({"ok": True, "users": users})
+    return jsonify({"error": "User not found"}), 404
+
+
 @app.post("/api/favourites")
 @require_login
 def update_favourite():
@@ -287,7 +421,7 @@ def update_favourite():
     favourite = bool(payload.get("favourite", True))
     user_id = session.get("user_id", "")
 
-    if not get_feature(feature_id):
+    if not get_feature(feature_id) or not is_feature_active(feature_id):
         return jsonify({"error": "Feature not found"}), 404
 
     users = load_auth_users()
@@ -311,6 +445,82 @@ def update_favourite():
 @require_login
 def api_features():
     return jsonify(list_features_for_user(session.get("user_id", "")))
+
+
+@app.get("/management/features")
+@require_login
+@require_feature_management
+def feature_management_page():
+    return render_template("feature_management.html", features=feature_management_payload(), user_id=session.get("user_id", ""))
+
+
+@app.get("/api/feature-management")
+@require_login
+@require_feature_management
+def api_feature_management():
+    return jsonify(feature_management_payload())
+
+
+@app.post("/api/feature-management/<feature_id>/toggle")
+@require_login
+@require_feature_management
+def toggle_feature(feature_id):
+    if not get_feature(feature_id):
+        return jsonify({"error": "Feature not found"}), 404
+    payload = request.get_json(silent=True) or {}
+    settings = load_feature_settings()
+    settings[feature_id]["active"] = bool(payload.get("active", True))
+    save_feature_settings(settings)
+    return jsonify({"ok": True, "features": feature_management_payload()})
+
+
+@app.post("/api/feature-management/<feature_id>/move")
+@require_login
+@require_feature_management
+def move_feature(feature_id):
+    feature = get_feature(feature_id)
+    if not feature:
+        return jsonify({"error": "Feature not found"}), 404
+    direction = (request.get_json(silent=True) or {}).get("direction")
+    if direction not in ("up", "down"):
+        return jsonify({"error": "Direction must be up or down"}), 400
+    settings = load_feature_settings()
+    category_features = sorted(
+        [item for item in list_features() if item["category"].lower() == feature["category"].lower()],
+        key=lambda item: (settings[item["id"]]["sort_order"], item["title"].lower()),
+    )
+    current_index = next(index for index, item in enumerate(category_features) if item["id"] == feature_id)
+    target_index = current_index - 1 if direction == "up" else current_index + 1
+    if 0 <= target_index < len(category_features):
+        other_id = category_features[target_index]["id"]
+        settings[feature_id]["sort_order"], settings[other_id]["sort_order"] = (
+            settings[other_id]["sort_order"], settings[feature_id]["sort_order"]
+        )
+        save_feature_settings(settings)
+    return jsonify({"ok": True, "features": feature_management_payload()})
+
+
+@app.post("/api/feature-management/<feature_id>/details")
+@require_login
+@require_feature_management
+def update_feature_details(feature_id):
+    feature = get_feature(feature_id)
+    if not feature:
+        return jsonify({"error": "Feature not found"}), 404
+    payload = request.get_json(silent=True) or {}
+    title = str(payload.get("title", "")).strip()
+    remark = str(payload.get("remark", "")).strip()
+    if not title:
+        return jsonify({"error": "Display name cannot be empty"}), 400
+    if len(title) > 100:
+        return jsonify({"error": "Display name must be 100 characters or fewer"}), 400
+    if len(remark) > 1000:
+        return jsonify({"error": "Remark must be 1,000 characters or fewer"}), 400
+    settings = load_feature_settings()
+    settings[feature_id]["title"] = title
+    settings[feature_id]["remark"] = remark
+    save_feature_settings(settings)
+    return jsonify({"ok": True, "features": feature_management_payload()})
 
 
 def _related_office_response(action):
@@ -603,6 +813,8 @@ def create_run():
     payload = request.get_json(silent=True) or {}
     feature_id = payload.get("feature_id", "")
     inputs = payload.get("inputs", {})
+    if not get_feature(feature_id) or not is_feature_active(feature_id):
+        return jsonify({"error": "Feature is inactive or not found"}), 404
     if feature_id == "sql_query":
         return jsonify({"error": "Use the SQL Query endpoint"}), 400
     try:
@@ -644,6 +856,8 @@ def runs_api():
 @app.post("/api/run")
 @require_login
 def create_run_v4_legacy():
+    if not is_feature_active("closing_report"):
+        return jsonify({"error": "Feature is inactive or not found"}), 404
     payload = request.get_json(silent=True) or {}
     try:
         run_id = start_run("closing_report", {"offices": payload.get("offices", [])})
