@@ -185,7 +185,9 @@ def _run_group(context, label, db_name, office_list, generated_files):
 
 
 def _zip_reports(output_dir, files):
-    zip_name = "YYZ_NA_closing_report_{0}.zip".format(str(d.date.today()))
+    zip_name = "YYZ_NA_closing_report_{0}.zip".format(
+        d.datetime.now().strftime("%Y%m%d%H%M%S")
+    )
     zip_path = os.path.join(output_dir, zip_name)
     with z.ZipFile(zip_path, "w") as zip_file:
         for file_name in files:
