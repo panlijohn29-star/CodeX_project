@@ -10,6 +10,7 @@ import features.ar_ap_breakdown as ar_ap_breakdown
 import features.offset_invoice as offset_invoice
 import features.sql_query as sql_query
 import features.eason_dfw_billing as eason_dfw_billing
+import features.eason_client_report as eason_client_report
 from features import get_feature, list_features
 from run_service import cancel_run, get_run, list_runs, start_run
 
@@ -462,6 +463,26 @@ def eason_dfw_billing_generate():
         return jsonify({"error": str(exc)}), 400
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
+
+
+@app.post("/api/eason-client-report/search")
+@require_login
+def eason_client_report_search():
+    payload = request.get_json(silent=True) or {}
+    return _interactive_tool_response(lambda: eason_client_report.search_payload(
+        payload.get("db_profile"), payload.get("search_values"), payload.get("office"),
+        payload.get("report_type"), payload.get("search_mode"), payload.get("job_type"),
+    ))
+
+
+@app.post("/api/eason-client-report/preview")
+@require_login
+def eason_client_report_preview():
+    payload = request.get_json(silent=True) or {}
+    return _interactive_tool_response(lambda: eason_client_report.preview_payload(
+        payload.get("db_profile"), payload.get("search_values"), payload.get("office"),
+        payload.get("report_type"), payload.get("search_mode"), payload.get("job_type"),
+    ))
 
 
 @app.post("/api/sql-query/runs")
