@@ -13,6 +13,7 @@ ENV/
 .env
 .env.*
 !.env.example
+auth_users_v4.json.pre_rbac_backup.json
 
 # Flask/runtime files
 instance/

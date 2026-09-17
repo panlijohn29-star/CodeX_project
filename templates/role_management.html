@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Role Management | Report Platform</title>
+  <style>
+    :root{--bg:#f6f7f9;--surface:#fff;--ink:#17202a;--muted:#607080;--line:#d8dee6;--accent:#145a7a;--bad:#8a3b22}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px Arial,Helvetica,sans-serif}a{color:var(--accent)}.shell{max-width:1050px;margin:auto;padding:24px 20px 44px}.topbar{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;padding-bottom:20px;border-bottom:1px solid var(--line)}h1{margin:0}h2{margin:0 0 12px}.note,.status{color:var(--muted);line-height:1.45}.note{margin:16px 0;padding:12px;border:1px solid #cfe0e8;border-radius:8px;background:#f1f8fb}.card{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:18px;margin-top:16px}.row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:14px;align-items:start;border-top:1px solid var(--line);padding:16px 0}.row:first-child{border-top:0;padding-top:0}.meta{color:var(--muted);margin-top:5px}.actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}input,textarea,button{font:inherit}input,textarea{width:100%;padding:9px;border:1px solid var(--line);border-radius:6px}.form{display:grid;gap:12px}.feature-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;padding:10px;border:1px solid var(--line);border-radius:6px;max-height:280px;overflow:auto}.feature-list label{display:flex;gap:7px;align-items:flex-start}.feature-list input{width:auto;margin-top:2px}button{border:0;border-radius:6px;background:var(--accent);color:#fff;padding:9px 12px;font-weight:700;cursor:pointer}button.secondary{background:#607080}button.danger{background:var(--bad)}.hidden{display:none}@media(max-width:680px){.row{grid-template-columns:1fr}.actions{justify-content:flex-start}}
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar"><div><div class="note" style="margin:0 0 8px;padding:0;border:0;background:none"><a href="/">Report Platform</a> / Administration</div><h1>Role Management</h1></div><div class="note" style="margin:0;padding:0;border:0;background:none">Signed in as {{ user_id }} | <a href="/logout">Log out</a></div></header>
+    <p class="note">A role controls the reports and tools a non-admin account can see and use. Accounts with no role have no feature access. Global feature activation remains controlled in Feature Management.</p>
+    <section class="card"><h2>Create role</h2><div class="form"><label>Stable role ID<input id="newId" maxlength="64" placeholder="example: billing-team"></label><label>Role name<input id="newName" maxlength="100" placeholder="example: Billing Team"></label><label>Admin remark<textarea id="newRemark" maxlength="1000" rows="2"></textarea></label><div id="newFeatures" class="feature-list"></div><div><button id="create">Create role</button> <span id="status" class="status">Ready</span></div></div></section>
+    <section class="card"><h2>Existing roles</h2><div id="roles"></div></section>
+  </main>
+  <script>
+    let roles={{ roles|tojson }},features={{ features|tojson }};const $=id=>document.getElementById(id),esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const featureInputs=(selected,prefix)=>features.map(feature=>`<label><input type="checkbox" value="${esc(feature.id)}" ${selected.includes(feature.id)?'checked':''}><span><strong>${esc(feature.title)}</strong><br><small>${esc(feature.category)}${feature.active?'':' · globally inactive'}</small></span></label>`).join('');
+    function checked(root){return [...root.querySelectorAll('input:checked')].map(input=>input.value)}
+    function render(){ $('newFeatures').innerHTML=featureInputs([],'new');$('roles').innerHTML=roles.length?roles.map(role=>`<div class="row" id="role-${esc(role.id)}"><div class="form"><label>Role ID<input value="${esc(role.id)}" disabled></label><label>Name<input class="name" value="${esc(role.name)}" maxlength="100"></label><label>Admin remark<textarea class="remark" maxlength="1000" rows="2">${esc(role.remark)}</textarea></label><div class="feature-list">${featureInputs(role.feature_ids,role.id)}</div></div><div class="actions"><button class="save" data-id="${esc(role.id)}">Save</button><button class="danger delete" data-id="${esc(role.id)}">Delete</button></div></div>`).join(''):'<p class="status">No roles yet.</p>';
+      document.querySelectorAll('.save').forEach(button=>button.onclick=()=>save(button.dataset.id));document.querySelectorAll('.delete').forEach(button=>button.onclick=()=>remove(button.dataset.id));}
+    async function refresh(response){const payload=await response.json();if(!response.ok)throw new Error(payload.error||'Unable to save');roles=payload.roles;features=payload.features;render()}
+    async function create(){try{$('status').textContent='Saving...';await refresh(await fetch('/api/roles',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:$('newId').value,name:$('newName').value,remark:$('newRemark').value,feature_ids:checked($('newFeatures'))})}));$('newId').value='';$('newName').value='';$('newRemark').value='';$('status').textContent='Role created'}catch(error){$('status').textContent=error.message}}
+    async function save(id){const root=$(`role-${id}`);try{await refresh(await fetch(`/api/roles/${encodeURIComponent(id)}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:root.querySelector('.name').value,remark:root.querySelector('.remark').value,feature_ids:checked(root)})}));$('status').textContent='Role saved'}catch(error){$('status').textContent=error.message}}
+    async function remove(id){if(!confirm(`Delete role ${id}?`))return;try{await refresh(await fetch(`/api/roles/${encodeURIComponent(id)}`,{method:'DELETE'}));$('status').textContent='Role deleted'}catch(error){$('status').textContent=error.message}}
+    $('create').onclick=create;render();
+  </script>
+</body>
+</html>

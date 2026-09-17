@@ -1,8 +1,12 @@
 from functools import wraps
 import json
 import os
+import re
+import shutil
+import tempfile
 
 from flask import Flask, abort, jsonify, redirect, render_template, request, send_file, session, url_for
+from werkzeug.security import check_password_hash, generate_password_hash
 
 import features.related_office_modification as related_office_modification
 import features.archive_currency_invoice as archive_currency_invoice
@@ -12,14 +16,130 @@ import features.sql_query as sql_query
 import features.eason_dfw_billing as eason_dfw_billing
 import features.eason_client_report as eason_client_report
 from features import get_feature, list_features
+from platform_config import env_value
 from run_service import cancel_run, get_run, list_runs, start_run
 
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", "report-platform-secret")
+app.secret_key = env_value("FLASK_SECRET_KEY")
+if not app.secret_key:
+    raise RuntimeError("FLASK_SECRET_KEY must be configured before starting the report platform")
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=env_value("SESSION_COOKIE_SECURE", "false").strip().lower() in ("1", "true", "yes", "on"),
+)
 
-AUTH_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "auth_users_v4.json")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+AUTH_CONFIG_PATH = os.environ.get("AUTH_CONFIG_PATH", os.path.join(BASE_DIR, "auth_users_v4.json"))
+ROLE_CONFIG_PATH = os.environ.get("ROLE_CONFIG_PATH", os.path.join(BASE_DIR, "roles_v4.json"))
 FEATURE_SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "feature_settings_v4.json")
+ROLE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+def _write_json_atomically(path, payload):
+    directory = os.path.dirname(path)
+    fd, temporary_path = tempfile.mkstemp(prefix=".auth-", suffix=".json", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=True, indent=2)
+            handle.write("\n")
+        os.replace(temporary_path, path)
+    except Exception:
+        if os.path.exists(temporary_path):
+            os.unlink(temporary_path)
+        raise
+
+
+def migrate_auth_users():
+    """Convert the legacy plaintext account file to the RBAC-safe schema once."""
+    with open(AUTH_CONFIG_PATH, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    users = payload.get("users", []) if isinstance(payload, dict) else []
+    if not isinstance(users, list):
+        raise ValueError("auth_users_v4.json users must be a list")
+
+    migrated_users = []
+    is_legacy = payload.get("schema_version") != 2
+    changed = is_legacy
+    for item in users:
+        if not isinstance(item, dict):
+            changed = True
+            continue
+        user = dict(item)
+        user_id = str(user.get("user_id", "")).strip()
+        if not user_id:
+            changed = True
+            continue
+        password_hash = str(user.get("password_hash", ""))
+        plaintext_password = user.pop("password", None)
+        if plaintext_password is not None:
+            password_hash = generate_password_hash(str(plaintext_password))
+            changed = True
+        if not password_hash:
+            raise ValueError("Account {0} has no password hash".format(user_id))
+        favourites = user.get("favourites", [])
+        if not isinstance(favourites, list):
+            favourites = []
+            changed = True
+        role_id = None if user_id == "admin" or is_legacy else user.get("role_id")
+        if role_id is not None:
+            role_id = str(role_id).strip() or None
+        if user.get("role_id") != role_id:
+            changed = True
+        if "sql_access" in user or "feature_management" in user:
+            changed = True
+        migrated_users.append({
+            "user_id": user_id,
+            "password_hash": password_hash,
+            "enabled": bool(user.get("enabled", True)),
+            "favourites": [str(feature_id) for feature_id in favourites],
+            "role_id": role_id,
+        })
+
+    if changed:
+        backup_path = AUTH_CONFIG_PATH + ".pre_rbac_backup.json"
+        if not os.path.exists(backup_path):
+            shutil.copy2(AUTH_CONFIG_PATH, backup_path)
+        _write_json_atomically(AUTH_CONFIG_PATH, {"schema_version": 2, "users": migrated_users})
+
+
+def load_roles():
+    try:
+        with open(ROLE_CONFIG_PATH, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except FileNotFoundError:
+        return []
+    roles = payload.get("roles", []) if isinstance(payload, dict) else []
+    valid_feature_ids = {feature["id"] for feature in list_features()}
+    result = []
+    seen_ids = set()
+    for item in roles if isinstance(roles, list) else []:
+        role_id = str(item.get("id", "")).strip()
+        if not ROLE_ID_PATTERN.fullmatch(role_id) or role_id in seen_ids:
+            continue
+        seen_ids.add(role_id)
+        name = str(item.get("name", "")).strip()
+        if not name:
+            continue
+        feature_ids = item.get("feature_ids", [])
+        if not isinstance(feature_ids, list):
+            feature_ids = []
+        result.append({
+            "id": role_id,
+            "name": name,
+            "remark": str(item.get("remark", "")).strip(),
+            "feature_ids": sorted({str(feature_id) for feature_id in feature_ids} & valid_feature_ids),
+        })
+    return sorted(result, key=lambda role: role["name"].lower())
+
+
+def save_roles(roles):
+    _write_json_atomically(ROLE_CONFIG_PATH, {"schema_version": 1, "roles": roles})
+
+
+def get_role(role_id):
+    return next((role for role in load_roles() if role["id"] == role_id), None)
 
 
 def load_auth_users():
@@ -28,7 +148,7 @@ def load_auth_users():
     users = []
     for item in payload.get("users", []):
         user_id = item.get("user_id", "").strip()
-        password = item.get("password", "")
+        password_hash = item.get("password_hash", "")
         enabled = bool(item.get("enabled", True))
         favourites = item.get("favourites", [])
         if not isinstance(favourites, list):
@@ -36,19 +156,29 @@ def load_auth_users():
         if user_id:
             users.append({
                 "user_id": user_id,
-                "password": password,
+                "password_hash": password_hash,
                 "enabled": enabled,
                 "favourites": [str(feature_id) for feature_id in favourites],
-                "sql_access": bool(item.get("sql_access", user_id == "admin")),
-                "feature_management": bool(item.get("feature_management", user_id == "admin")),
+                "role_id": None if user_id == "admin" else item.get("role_id"),
             })
     return users
 
 
 def save_auth_users(users):
-    payload = {"users": users}
-    with open(AUTH_CONFIG_PATH, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=True, indent=2)
+    _write_json_atomically(AUTH_CONFIG_PATH, {"schema_version": 2, "users": users})
+
+
+def public_auth_user(user):
+    role = get_role(user.get("role_id"))
+    return {
+        "user_id": user["user_id"],
+        "enabled": user["enabled"],
+        "role_id": user.get("role_id"),
+        "role_name": role["name"] if role else None,
+    }
+
+
+migrate_auth_users()
 
 
 def get_auth_user(user_id):
@@ -132,7 +262,7 @@ def list_features_for_user(user_id):
     for feature in list_features():
         if not settings[feature["id"]]["active"]:
             continue
-        if feature["id"] == "sql_query" and not has_sql_access(user_id):
+        if not has_feature_access(feature["id"], user_id):
             continue
         item = dict(feature)
         item["title"] = settings[item["id"]]["title"]
@@ -152,9 +282,19 @@ def is_admin_user():
     return session.get("user_id") == "admin"
 
 
+def has_feature_access(feature_id, user_id=None):
+    if not get_feature(feature_id):
+        return False
+    selected_user_id = user_id or session.get("user_id", "")
+    if selected_user_id == "admin":
+        return True
+    user = get_auth_user(selected_user_id)
+    role = get_role(user.get("role_id")) if user else None
+    return bool(role and feature_id in role["feature_ids"])
+
+
 def can_manage_features():
-    user = get_auth_user(session.get("user_id", ""))
-    return bool(user and user.get("feature_management", False))
+    return is_admin_user()
 
 
 FEATURE_ENDPOINTS = {
@@ -186,20 +326,29 @@ FEATURE_ENDPOINTS = {
 @app.before_request
 def block_inactive_feature_endpoints():
     feature_id = FEATURE_ENDPOINTS.get(request.endpoint)
-    if feature_id and session.get("authenticated") and not is_feature_active(feature_id):
+    if feature_id and session.get("authenticated") and (
+        not is_feature_active(feature_id) or not has_feature_access(feature_id)
+    ):
         abort(404)
 
 
-def has_sql_access(user_id=None):
-    user = get_auth_user(user_id or session.get("user_id", ""))
-    return bool(user and user.get("sql_access", user.get("user_id") == "admin"))
+def require_feature_access(feature_id):
+    """Hide an unassigned or unauthorized feature behind a 404 response."""
+    def decorator(view_func):
+        @wraps(view_func)
+        def wrapper(*args, **kwargs):
+            if not is_feature_active(feature_id) or not has_feature_access(feature_id):
+                abort(404)
+            return view_func(*args, **kwargs)
+        return wrapper
+    return decorator
 
 
 def require_sql_access(view_func):
     @wraps(view_func)
     def wrapper(*args, **kwargs):
-        if not has_sql_access():
-            return jsonify({"error": "SQL Query access is not enabled for this account"}), 403
+        if not is_feature_active("sql_query") or not has_feature_access("sql_query"):
+            abort(404)
         return view_func(*args, **kwargs)
     return wrapper
 
@@ -208,6 +357,12 @@ def can_access_sql_run(run_info):
     if not run_info or run_info.get("feature_id") != "sql_query":
         return True
     return run_info.get("inputs", {}).get("owner_user_id") == session.get("user_id")
+
+
+def can_access_run(run_info):
+    if not run_info or not has_feature_access(run_info.get("feature_id", "")):
+        return False
+    return can_access_sql_run(run_info)
 
 
 def require_login(view_func):
@@ -225,7 +380,7 @@ def require_feature_management(view_func):
     @wraps(view_func)
     def wrapper(*args, **kwargs):
         if not can_manage_features():
-            return jsonify({"error": "Feature management access is not enabled for this account"}), 403
+            abort(404)
         return view_func(*args, **kwargs)
     return wrapper
 
@@ -237,7 +392,7 @@ def login():
         user_id = request.form.get("user_id", "")
         password = request.form.get("password", "")
         auth_user = get_auth_user(user_id)
-        if auth_user and auth_user["enabled"] and auth_user["password"] == password:
+        if auth_user and auth_user["enabled"] and check_password_hash(auth_user["password_hash"], password):
             session["authenticated"] = True
             session["user_id"] = user_id
             return redirect(url_for("index_v4"))
@@ -262,7 +417,8 @@ def index_v4():
         reports=reports,
         tools=tools,
         user_id=user_id,
-        auth_users=load_auth_users(),
+        auth_users=[public_auth_user(user) for user in load_auth_users()] if is_admin_user() else [],
+        roles=load_roles() if is_admin_user() else [],
         is_admin=is_admin_user(),
         can_manage_features=can_manage_features(),
     )
@@ -276,8 +432,8 @@ def feature_page(feature_id):
         abort(404)
     feature = dict(feature)
     feature["title"] = load_feature_settings()[feature_id]["title"]
-    if feature_id == "sql_query" and not has_sql_access():
-        abort(403)
+    if not has_feature_access(feature_id):
+        abort(404)
     if feature.get("template"):
         return render_template(
             feature["template"],
@@ -321,9 +477,9 @@ def change_password():
     updated = False
     for user in users:
         if user["user_id"] == user_id:
-            if user["password"] != current_password:
+            if not check_password_hash(user["password_hash"], current_password):
                 return jsonify({"error": "Current password is incorrect"}), 400
-            user["password"] = new_password
+            user["password_hash"] = generate_password_hash(new_password)
             updated = True
             break
 
@@ -338,7 +494,7 @@ def change_password():
 @require_login
 def create_account():
     if not is_admin_user():
-        return jsonify({"error": "Admin only"}), 403
+        abort(404)
 
     payload = request.get_json(silent=True) or {}
     user_id = payload.get("user_id", "").strip()
@@ -352,16 +508,20 @@ def create_account():
     if any(user["user_id"] == user_id for user in users):
         return jsonify({"error": "User already exists"}), 400
 
-    users.append({"user_id": user_id, "password": password, "enabled": enabled, "favourites": [], "sql_access": False, "feature_management": False})
+    role_id = payload.get("role_id")
+    role_id = str(role_id).strip() if role_id is not None else None
+    if role_id and not get_role(role_id):
+        return jsonify({"error": "Role not found"}), 400
+    users.append({"user_id": user_id, "password_hash": generate_password_hash(password), "enabled": enabled, "favourites": [], "role_id": role_id})
     save_auth_users(users)
-    return jsonify({"ok": True, "users": users})
+    return jsonify({"ok": True, "users": [public_auth_user(user) for user in users]})
 
 
 @app.post("/api/account/toggle")
 @require_login
 def toggle_account():
     if not is_admin_user():
-        return jsonify({"error": "Admin only"}), 403
+        abort(404)
 
     payload = request.get_json(silent=True) or {}
     user_id = payload.get("user_id", "").strip()
@@ -374,42 +534,32 @@ def toggle_account():
                 return jsonify({"error": "Admin account cannot be disabled"}), 400
             user["enabled"] = enabled
             save_auth_users(users)
-            return jsonify({"ok": True, "users": users})
+            return jsonify({"ok": True, "users": [public_auth_user(item) for item in users]})
 
     return jsonify({"error": "User not found"}), 404
 
 
-@app.post("/api/account/sql-access")
+@app.post("/api/account/role")
 @require_login
-def toggle_sql_access():
+def update_account_role():
     if not is_admin_user():
-        return jsonify({"error": "Admin only"}), 403
+        abort(404)
     payload = request.get_json(silent=True) or {}
-    user_id = payload.get("user_id", "").strip()
-    enabled = bool(payload.get("enabled", False))
+    user_id = str(payload.get("user_id", "")).strip()
+    role_id = payload.get("role_id")
+    role_id = str(role_id).strip() if role_id is not None else None
+    if role_id and not get_role(role_id):
+        return jsonify({"error": "Role not found"}), 400
+    if user_id == "admin":
+        return jsonify({"error": "Admin role cannot be changed"}), 400
     users = load_auth_users()
     for user in users:
         if user["user_id"] == user_id:
-            user["sql_access"] = enabled
+            user["role_id"] = role_id
+            allowed_feature_ids = set(get_role(role_id)["feature_ids"]) if role_id else set()
+            user["favourites"] = [feature_id for feature_id in user.get("favourites", []) if feature_id in allowed_feature_ids]
             save_auth_users(users)
-            return jsonify({"ok": True, "users": users})
-    return jsonify({"error": "User not found"}), 404
-
-
-@app.post("/api/account/feature-management")
-@require_login
-def toggle_feature_management_access():
-    if not is_admin_user():
-        return jsonify({"error": "Admin only"}), 403
-    payload = request.get_json(silent=True) or {}
-    user_id = payload.get("user_id", "").strip()
-    enabled = bool(payload.get("enabled", False))
-    users = load_auth_users()
-    for user in users:
-        if user["user_id"] == user_id:
-            user["feature_management"] = enabled
-            save_auth_users(users)
-            return jsonify({"ok": True, "users": users})
+            return jsonify({"ok": True, "users": [public_auth_user(item) for item in users]})
     return jsonify({"error": "User not found"}), 404
 
 
@@ -421,7 +571,7 @@ def update_favourite():
     favourite = bool(payload.get("favourite", True))
     user_id = session.get("user_id", "")
 
-    if not get_feature(feature_id) or not is_feature_active(feature_id):
+    if not get_feature(feature_id) or not is_feature_active(feature_id) or not has_feature_access(feature_id):
         return jsonify({"error": "Feature not found"}), 404
 
     users = load_auth_users()
@@ -445,6 +595,106 @@ def update_favourite():
 @require_login
 def api_features():
     return jsonify(list_features_for_user(session.get("user_id", "")))
+
+
+def role_management_payload():
+    settings = load_feature_settings()
+    return {
+        "roles": load_roles(),
+        "features": [
+            {
+                "id": feature["id"],
+                "title": settings[feature["id"]]["title"],
+                "category": feature["category"],
+                "active": settings[feature["id"]]["active"],
+            }
+            for feature in list_features()
+        ],
+    }
+
+
+def validate_role_payload(payload, allow_id=False):
+    role_id = str(payload.get("id", "")).strip()
+    if allow_id and not ROLE_ID_PATTERN.fullmatch(role_id):
+        raise ValueError("Role ID must use lowercase letters, numbers, hyphens, or underscores")
+    name = str(payload.get("name", "")).strip()
+    remark = str(payload.get("remark", "")).strip()
+    if not name or len(name) > 100:
+        raise ValueError("Role name must be 1 to 100 characters")
+    if len(remark) > 1000:
+        raise ValueError("Role remark must be 1,000 characters or fewer")
+    feature_ids = payload.get("feature_ids", [])
+    if not isinstance(feature_ids, list):
+        raise ValueError("Feature IDs must be a list")
+    valid_feature_ids = {feature["id"] for feature in list_features()}
+    selected_ids = {str(feature_id) for feature_id in feature_ids}
+    if not selected_ids <= valid_feature_ids:
+        raise ValueError("One or more selected features do not exist")
+    result = {"name": name, "remark": remark, "feature_ids": sorted(selected_ids)}
+    if allow_id:
+        result["id"] = role_id
+    return result
+
+
+@app.get("/management/roles")
+@require_login
+@require_feature_management
+def role_management_page():
+    return render_template("role_management.html", user_id=session.get("user_id", ""), **role_management_payload())
+
+
+@app.get("/api/roles")
+@require_login
+@require_feature_management
+def api_roles():
+    return jsonify(role_management_payload())
+
+
+@app.post("/api/roles")
+@require_login
+@require_feature_management
+def create_role():
+    try:
+        role = validate_role_payload(request.get_json(silent=True) or {}, allow_id=True)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    roles = load_roles()
+    if any(item["id"] == role["id"] for item in roles):
+        return jsonify({"error": "Role ID already exists"}), 400
+    roles.append(role)
+    save_roles(roles)
+    return jsonify({"ok": True, **role_management_payload()})
+
+
+@app.put("/api/roles/<role_id>")
+@require_login
+@require_feature_management
+def update_role(role_id):
+    try:
+        updates = validate_role_payload(request.get_json(silent=True) or {})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    roles = load_roles()
+    for role in roles:
+        if role["id"] == role_id:
+            role.update(updates)
+            save_roles(roles)
+            return jsonify({"ok": True, **role_management_payload()})
+    abort(404)
+
+
+@app.delete("/api/roles/<role_id>")
+@require_login
+@require_feature_management
+def delete_role(role_id):
+    if any(user.get("role_id") == role_id for user in load_auth_users()):
+        return jsonify({"error": "Reassign accounts before deleting this role"}), 400
+    roles = load_roles()
+    remaining_roles = [role for role in roles if role["id"] != role_id]
+    if len(remaining_roles) == len(roles):
+        abort(404)
+    save_roles(remaining_roles)
+    return jsonify({"ok": True, **role_management_payload()})
 
 
 @app.get("/management/features")
@@ -813,7 +1063,7 @@ def create_run():
     payload = request.get_json(silent=True) or {}
     feature_id = payload.get("feature_id", "")
     inputs = payload.get("inputs", {})
-    if not get_feature(feature_id) or not is_feature_active(feature_id):
+    if not get_feature(feature_id) or not is_feature_active(feature_id) or not has_feature_access(feature_id):
         return jsonify({"error": "Feature is inactive or not found"}), 404
     if feature_id == "sql_query":
         return jsonify({"error": "Use the SQL Query endpoint"}), 400
@@ -828,8 +1078,8 @@ def create_run():
 @require_login
 def cancel_run_api(run_id):
     run_info = get_run(run_id)
-    if run_info and not can_access_sql_run(run_info):
-        abort(403)
+    if not run_info or not can_access_run(run_info):
+        abort(404)
     run_info = cancel_run(run_id)
     if not run_info:
         abort(404)
@@ -842,21 +1092,21 @@ def run_status(run_id):
     run_info = get_run(run_id)
     if not run_info:
         abort(404)
-    if not can_access_sql_run(run_info):
-        abort(403)
+    if not can_access_run(run_info):
+        abort(404)
     return jsonify(run_info)
 
 
 @app.get("/api/runs")
 @require_login
 def runs_api():
-    return jsonify([run for run in list_runs() if can_access_sql_run(run)])
+    return jsonify([run for run in list_runs() if can_access_run(run)])
 
 
 @app.post("/api/run")
 @require_login
 def create_run_v4_legacy():
-    if not is_feature_active("closing_report"):
+    if not is_feature_active("closing_report") or not has_feature_access("closing_report"):
         return jsonify({"error": "Feature is inactive or not found"}), 404
     payload = request.get_json(silent=True) or {}
     try:
@@ -884,8 +1134,8 @@ def download_v4(run_id):
     run_info = get_run(run_id)
     if not run_info:
         abort(404)
-    if not can_access_sql_run(run_info):
-        abort(403)
+    if not can_access_run(run_info):
+        abort(404)
     if run_info["status"] != "completed" or not run_info.get("zip_path"):
         abort(404)
     if not os.path.exists(run_info["zip_path"]):
@@ -899,8 +1149,8 @@ def download_output(run_id, filename):
     run_info = get_run(run_id)
     if not run_info or run_info["status"] != "completed":
         abort(404)
-    if not can_access_sql_run(run_info):
-        abort(403)
+    if not can_access_run(run_info):
+        abort(404)
     for output in run_info.get("outputs", []):
         output_path = output.get("path")
         if output.get("name") == filename and output_path and os.path.exists(output_path):
@@ -911,6 +1161,8 @@ def download_output(run_id, filename):
 @app.get("/download/offset-invoice/<path:filename>")
 @require_login
 def download_offset_invoice(filename):
+    if not has_feature_access("offset_invoice") or not is_feature_active("offset_invoice"):
+        abort(404)
     output_path = offset_invoice.output_path_for(filename)
     if not output_path or not os.path.exists(output_path):
         abort(404)
@@ -920,6 +1172,8 @@ def download_offset_invoice(filename):
 @app.get("/download/eason-dfw-billing/<path:filename>")
 @require_login
 def download_eason_dfw_billing(filename):
+    if not has_feature_access("eason_dfw_billing") or not is_feature_active("eason_dfw_billing"):
+        abort(404)
     output_path = eason_dfw_billing.output_path_for(filename)
     if not output_path or not output_path.exists():
         abort(404)

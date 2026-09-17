@@ -1,22 +1,21 @@
 {
+  "schema_version": 2,
   "users": [
     {
       "user_id": "admin",
-      "password": "admin88",
+      "password_hash": "scrypt:32768:8:1$O5XJsfEPRFzsgbTT$2f13697ba3d1b6f3f82ddb21a470a9c3d67908f754ab3b11107ccc447ba599a74aabb0e21bd6d60acf0060a907bfc02d903a3875fb51c81023a5fb56f290e1d8",
       "enabled": true,
       "favourites": [],
-      "sql_access": true,
-      "feature_management": true
+      "role_id": null
     },
     {
       "user_id": "panlijohn",
-      "password": "Johnpanli28",
+      "password_hash": "scrypt:32768:8:1$YHcQUYGX0Q6fe0rP$82e30d2952c2aa6539685b2327113430a89a29b7bf946b04bd626f90ee2f2c7c9ee6e8381e8b00493fb008b3af84836b964ffd9cc5ea034fd2d736bec3279018",
       "enabled": true,
       "favourites": [
         "sql_query"
       ],
-      "sql_access": true,
-      "feature_management": true
+      "role_id": "admin"
     }
   ]
 }

@@ -54,7 +54,7 @@ http://localhost:5001
 
 ## Login
 
-Users are configured in `auth_users_v4.json`.
+Users are configured in `auth_users_v4.json`; roles and feature grants are configured in `roles_v4.json`. On the first RBAC-enabled start, the platform creates `auth_users_v4.json.pre_rbac_backup.json`, converts legacy plaintext passwords to secure hashes, and leaves every non-admin account with no assigned role.
 
 Default admin account:
 
@@ -63,7 +63,9 @@ ID: admin
 Password: admin88
 ```
 
-Admin users can add users, enable or disable non-admin accounts, and grant SQL Query access from the dashboard. Any logged-in user can change their own password.
+Only `admin` can add, enable/disable, and assign roles to non-admin accounts. Create roles from **Manage roles and feature access**, then grant each role its permitted reports and tools (including SQL Query). An account with no role can sign in but cannot access any feature. Any logged-in user can change their own password.
+
+Set `FLASK_SECRET_KEY` in `.env` before starting the platform. For HTTPS deployment, set `SESSION_COOKIE_SECURE=true`; leave it false only for local HTTP development.
 
 ## Project Structure
 
