@@ -8,8 +8,9 @@ from platform_config import get_db_config
 ALLOWED_DB_PROFILES = ("scdbus",)
 REPORT_TYPE_OPTIONS = ("ALL", "AP", "AR")
 HBL_JOB_TYPES = ("AI", "AE", "DO", "OE", "OI")
-MAX_INPUT_VALUES = 300
-MAX_PREVIEW_ROWS = 5000
+# Keep individual database IN clauses manageable without imposing a user-facing
+# limit.  Larger pasted lists are queried in batches and merged below.
+QUERY_BATCH_SIZE = 300
 EMPTY_COLUMNS = [
     "report_type", "job_no", "MBL_NO", "HBL_NO", "billing_office", "invoice_no",
     "invoice_status", "invoice_edi_status", "CHARGE_LOCAL_NAME", "cost_amt",
@@ -38,9 +39,12 @@ def parse_values(raw_text):
         if value and key not in seen:
             values.append(value)
             seen.add(key)
-    if len(values) > MAX_INPUT_VALUES:
-        raise ValueError("A maximum of {0} unique Job/HBL numbers can be queried at once".format(MAX_INPUT_VALUES))
     return values
+
+
+def _value_batches(values):
+    for start in range(0, len(values), QUERY_BATCH_SIZE):
+        yield values[start:start + QUERY_BATCH_SIZE]
 
 
 def normalize_db_profile(db_profile):
@@ -136,7 +140,7 @@ def build_query(search_values, office, report_type, search_mode, job_type=""):
         query, label_params = _select_sql(table, label, search_filter)
         queries.append(query)
         params.extend(label_params + search_params + [office])
-    return "\nUNION ALL\n".join(queries) + "\norder by invoice_no\nlimit {0}".format(MAX_PREVIEW_ROWS + 1), params, selected_type, selected_mode, selected_job_type
+    return "\nUNION ALL\n".join(queries) + "\norder by invoice_no", params, selected_type, selected_mode, selected_job_type
 
 
 def _connect(db_profile):
@@ -203,28 +207,46 @@ where v_jobinfo.JOB_TYPE = %s and {0} in ({1})
 def search_payload(db_profile, raw_search_values, office, report_type, search_mode, job_type=""):
     profile = normalize_db_profile(db_profile)
     search_values = parse_values(raw_search_values)
-    sql, params, selected_type, selected_mode, selected_job_type = build_query(search_values, office, report_type, search_mode, job_type)
+    if not search_values:
+        raise ValueError("Please enter at least one {0}".format("HBL number" if str(search_mode).strip().upper() == "HBL_NO" else "job number"))
     connection = _connect(profile)
     try:
-        with connection.cursor() as cursor:
-            cursor.execute(sql, params)
-            rows = cursor.fetchall()
-        no_office, not_found = _classify_search_values(connection, search_values, str(office).strip(), selected_type, selected_mode, selected_job_type)
-        query_sql = _preview_sql(connection, sql, params)
+        rows, no_office, not_found, query_sqls = [], [], [], []
+        selected_type = selected_mode = selected_job_type = None
+        for batch_number, batch_values in enumerate(_value_batches(search_values), start=1):
+            sql, params, selected_type, selected_mode, selected_job_type = build_query(
+                batch_values, office, report_type, search_mode, job_type,
+            )
+            with connection.cursor() as cursor:
+                cursor.execute(sql, params)
+                rows.extend(cursor.fetchall())
+            batch_no_office, batch_not_found = _classify_search_values(
+                connection, batch_values, str(office).strip(), selected_type, selected_mode, selected_job_type,
+            )
+            no_office.extend(batch_no_office)
+            not_found.extend(batch_not_found)
+            query_sqls.append("-- Batch {0}\n{1}".format(batch_number, _preview_sql(connection, sql, params)))
     finally:
         connection.close()
-    truncated = len(rows) > MAX_PREVIEW_ROWS
-    public_rows = [{key: _safe_value(value) for key, value in row.items()} for row in rows[:MAX_PREVIEW_ROWS]]
-    return {"ok": True, "db_profile": profile, "report_type": selected_type, "search_mode": selected_mode, "job_type": selected_job_type, "columns": list(public_rows[0]) if public_rows else EMPTY_COLUMNS, "rows": public_rows, "row_count": len(public_rows), "truncated": truncated, "max_preview_rows": MAX_PREVIEW_ROWS, "no_office_charges": no_office, "not_found": not_found, "query_sql": query_sql}
+    rows.sort(key=lambda row: str(row.get("invoice_no") or ""))
+    public_rows = [{key: _safe_value(value) for key, value in row.items()} for row in rows]
+    return {"ok": True, "db_profile": profile, "report_type": selected_type, "search_mode": selected_mode, "job_type": selected_job_type, "columns": list(public_rows[0]) if public_rows else EMPTY_COLUMNS, "rows": public_rows, "row_count": len(public_rows), "no_office_charges": no_office, "not_found": not_found, "query_sql": "\n\n".join(query_sqls)}
 
 
 def preview_payload(db_profile, raw_search_values, office, report_type, search_mode, job_type=""):
     profile = normalize_db_profile(db_profile)
     search_values = parse_values(raw_search_values)
-    sql, params, selected_type, selected_mode, selected_job_type = build_query(search_values, office, report_type, search_mode, job_type)
+    if not search_values:
+        raise ValueError("Please enter at least one {0}".format("HBL number" if str(search_mode).strip().upper() == "HBL_NO" else "job number"))
     connection = _connect(profile)
     try:
-        query_sql = _preview_sql(connection, sql, params)
+        query_sqls = []
+        selected_type = selected_mode = selected_job_type = None
+        for batch_number, batch_values in enumerate(_value_batches(search_values), start=1):
+            sql, params, selected_type, selected_mode, selected_job_type = build_query(
+                batch_values, office, report_type, search_mode, job_type,
+            )
+            query_sqls.append("-- Batch {0}\n{1}".format(batch_number, _preview_sql(connection, sql, params)))
     finally:
         connection.close()
-    return {"ok": True, "db_profile": profile, "report_type": selected_type, "search_mode": selected_mode, "job_type": selected_job_type, "query_sql": query_sql}
+    return {"ok": True, "db_profile": profile, "report_type": selected_type, "search_mode": selected_mode, "job_type": selected_job_type, "query_sql": "\n\n".join(query_sqls)}
