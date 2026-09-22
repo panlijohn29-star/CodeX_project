@@ -12,6 +12,7 @@
         "eason_client_report",
         "eason_dfw_billing",
         "offset_invoice",
+        "ord_ae_closing",
         "related_office_modification",
         "sql_query"
       ]
@@ -24,6 +25,14 @@
         "closing_report",
         "eason_client_report"
       ]
+    },
+    {
+      "name": "ord_ae",
+      "remark": "ord_ae",
+      "feature_ids": [
+        "ord_ae_closing"
+      ],
+      "id": "ord_ae"
     }
   ]
 }

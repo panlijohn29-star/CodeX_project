@@ -46,5 +46,11 @@
     "sort_order": 7,
     "title": "Charges/Cost Detail Report",
     "remark": ""
+  },
+  "ord_ae_closing": {
+    "active": true,
+    "sort_order": 8,
+    "title": "ORD AE Closing Report",
+    "remark": ""
   }
 }

@@ -15,6 +15,7 @@ import features.offset_invoice as offset_invoice
 import features.sql_query as sql_query
 import features.eason_dfw_billing as eason_dfw_billing
 import features.eason_client_report as eason_client_report
+import features.ord_ae_closing as ord_ae_closing
 from features import get_feature, list_features
 from platform_config import env_value
 from run_service import cancel_run, get_run, list_runs, start_run
@@ -310,6 +311,9 @@ FEATURE_ENDPOINTS = {
     "eason_dfw_billing_generate": "eason_dfw_billing",
     "eason_client_report_search": "eason_client_report",
     "eason_client_report_preview": "eason_client_report",
+    "ord_ae_closing_search": "ord_ae_closing",
+    "ord_ae_closing_preview": "ord_ae_closing",
+    "ord_ae_closing_export": "ord_ae_closing",
     "sql_query_start": "sql_query",
     "sql_query_status": "sql_query",
     "sql_query_cancel": "sql_query",
@@ -943,6 +947,55 @@ def eason_client_report_preview():
         payload.get("db_profile"), payload.get("search_values"), payload.get("office"),
         payload.get("report_type"), payload.get("search_mode"), payload.get("job_type"),
     ))
+
+
+@app.post("/api/ord-ae-closing/search")
+@require_login
+@require_feature_access("ord_ae_closing")
+def ord_ae_closing_search():
+    payload = request.get_json(silent=True) or {}
+    return _interactive_tool_response(lambda: ord_ae_closing.search_payload(
+        payload.get("db_profile"),
+        closing_status=payload.get("closing_status"), etd_from=payload.get("etd_from"),
+        etd_to=payload.get("etd_to"), job_no=payload.get("job_no"),
+        customer=payload.get("customer"), customer_mode=payload.get("customer_mode"),
+        mbl_no=payload.get("mbl_no"), hbl_no=payload.get("hbl_no"),
+    ))
+
+
+@app.post("/api/ord-ae-closing/preview")
+@require_login
+@require_feature_access("ord_ae_closing")
+def ord_ae_closing_preview():
+    payload = request.get_json(silent=True) or {}
+    return _interactive_tool_response(lambda: ord_ae_closing.preview_payload(
+        payload.get("db_profile"),
+        closing_status=payload.get("closing_status"), etd_from=payload.get("etd_from"),
+        etd_to=payload.get("etd_to"), job_no=payload.get("job_no"),
+        customer=payload.get("customer"), customer_mode=payload.get("customer_mode"),
+        mbl_no=payload.get("mbl_no"), hbl_no=payload.get("hbl_no"),
+    ))
+
+
+@app.post("/api/ord-ae-closing/export/<export_type>")
+@require_login
+@require_feature_access("ord_ae_closing")
+def ord_ae_closing_export(export_type):
+    payload = request.get_json(silent=True) or {}
+    try:
+        output, filename = ord_ae_closing.export_workbook(
+            payload.get("db_profile"), export_type, request_date=payload.get("request_date"),
+            closing_status=payload.get("closing_status"), etd_from=payload.get("etd_from"),
+            etd_to=payload.get("etd_to"), job_no=payload.get("job_no"),
+            customer=payload.get("customer"), customer_mode=payload.get("customer_mode"),
+            mbl_no=payload.get("mbl_no"), hbl_no=payload.get("hbl_no"),
+        )
+        return send_file(output, as_attachment=True, download_name=filename,
+                         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
 
 
 @app.post("/api/sql-query/runs")
