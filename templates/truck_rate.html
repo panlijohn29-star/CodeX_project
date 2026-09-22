@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ feature.title }} | Report Platform</title>
+  <style>
+    :root{--navy:#153d5b;--blue:#1e6b9a;--muted:#697888;--bg:#f3f6f8}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:#162330;font:14px/1.45 "Segoe UI",Arial,sans-serif}.shell{max-width:1600px;margin:auto;padding:24px}.top{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:18px}a{color:var(--blue);text-decoration:none}.crumb,.meta,.subtitle{color:var(--muted);font-size:13px}h1{margin:4px 0;font-size:27px}.frame{display:block;width:100%;height:calc(100vh - 160px);min-height:720px;border:1px solid #d9e2e9;border-radius:12px;background:#fff;box-shadow:0 5px 18px #18364b0c}@media(max-width:680px){.shell{padding:14px}.top{flex-direction:column;margin-bottom:12px}.frame{height:calc(100vh - 150px);min-height:620px}}
+  </style>
+</head>
+<body><main class="shell">
+  <header class="top"><div><div class="crumb"><a href="/">Report Platform</a> / {{ feature.category }}</div><h1>{{ feature.title }}</h1><div class="subtitle">Rates and locations are stored locally in this browser.</div></div><div class="meta">Signed in as {{ user_id }} · <a href="/logout">Log out</a></div></header>
+  <iframe class="frame" title="Truck Rate Manager" src="{{ url_for('truck_rate_app') }}"></iframe>
+</main></body>
+</html>

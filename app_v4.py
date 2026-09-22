@@ -5,7 +5,7 @@ import re
 import shutil
 import tempfile
 
-from flask import Flask, abort, jsonify, redirect, render_template, request, send_file, session, url_for
+from flask import Flask, Response, abort, jsonify, redirect, render_template, request, send_file, send_from_directory, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
 
 import features.related_office_modification as related_office_modification
@@ -32,6 +32,7 @@ app.config.update(
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+TRUCK_RATE_DIST_DIR = os.path.join(BASE_DIR, "static", "truck_rate")
 AUTH_CONFIG_PATH = os.environ.get("AUTH_CONFIG_PATH", os.path.join(BASE_DIR, "auth_users_v4.json"))
 ROLE_CONFIG_PATH = os.environ.get("ROLE_CONFIG_PATH", os.path.join(BASE_DIR, "roles_v4.json"))
 FEATURE_SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "feature_settings_v4.json")
@@ -299,6 +300,8 @@ def can_manage_features():
 
 
 FEATURE_ENDPOINTS = {
+    "truck_rate_app": "truck_rate",
+    "truck_rate_asset": "truck_rate",
     "related_office_lookup": "related_office_modification",
     "related_office_company": "related_office_modification",
     "related_office_execute": "related_office_modification",
@@ -464,6 +467,26 @@ def feature_page(feature_id):
         },
         user_id=session.get("user_id", "admin"),
     )
+
+
+@app.get("/tools/truck-rate/")
+@require_login
+@require_feature_access("truck_rate")
+def truck_rate_app():
+    with open(os.path.join(TRUCK_RATE_DIST_DIR, "index.html"), "r", encoding="utf-8") as handle:
+        page = handle.read()
+    api_key = json.dumps(env_value("TRUCK_RATE_GOOGLE_MAPS_API_KEY", "")).replace("<", "\\u003c")
+    page = page.replace("</head>", "<script>window.__TRUCK_RATE_GOOGLE_MAPS_API_KEY={0};</script></head>".format(api_key))
+    page = page.replace('"/assets/', '"/tools/truck-rate/assets/')
+    page = page.replace('"/favicon.svg', '"/tools/truck-rate/favicon.svg')
+    return Response(page, mimetype="text/html")
+
+
+@app.get("/tools/truck-rate/<path:asset_path>")
+@require_login
+@require_feature_access("truck_rate")
+def truck_rate_asset(asset_path):
+    return send_from_directory(TRUCK_RATE_DIST_DIR, asset_path)
 
 
 @app.post("/api/account/password")

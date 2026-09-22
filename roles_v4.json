@@ -14,7 +14,8 @@
         "offset_invoice",
         "ord_ae_closing",
         "related_office_modification",
-        "sql_query"
+        "sql_query",
+        "truck_rate"
       ]
     },
     {
@@ -27,12 +28,20 @@
       ]
     },
     {
+      "id": "ord_ae",
       "name": "ord_ae",
       "remark": "ord_ae",
       "feature_ids": [
         "ord_ae_closing"
+      ]
+    },
+    {
+      "name": "truck-rate",
+      "remark": "truck-rate",
+      "feature_ids": [
+        "truck_rate"
       ],
-      "id": "ord_ae"
+      "id": "truck-rate"
     }
   ]
 }

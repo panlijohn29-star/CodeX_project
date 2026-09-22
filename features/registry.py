@@ -7,6 +7,7 @@ import features.sql_query as sql_query
 import features.eason_dfw_billing as eason_dfw_billing
 import features.eason_client_report as eason_client_report
 import features.ord_ae_closing as ord_ae_closing
+import features.truck_rate as truck_rate
 
 
 FEATURES = {
@@ -19,6 +20,7 @@ FEATURES = {
     eason_dfw_billing.FEATURE["id"]: eason_dfw_billing.FEATURE,
     eason_client_report.FEATURE["id"]: eason_client_report.FEATURE,
     ord_ae_closing.FEATURE["id"]: ord_ae_closing.FEATURE,
+    truck_rate.FEATURE["id"]: truck_rate.FEATURE,
 }
 
 
