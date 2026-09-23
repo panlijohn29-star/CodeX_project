@@ -479,7 +479,11 @@ def truck_rate_app():
     page = page.replace("</head>", "<script>window.__TRUCK_RATE_GOOGLE_MAPS_API_KEY={0};</script></head>".format(api_key))
     page = page.replace('"/assets/', '"/tools/truck-rate/assets/')
     page = page.replace('"/favicon.svg', '"/tools/truck-rate/favicon.svg')
-    return Response(page, mimetype="text/html")
+    response = Response(page, mimetype="text/html")
+    # This page injects the Maps key and compatibility script at request time.
+    # Never allow a browser to reuse an older cached copy without them.
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    return response
 
 
 @app.get("/tools/truck-rate/<path:asset_path>")
