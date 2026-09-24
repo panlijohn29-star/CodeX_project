@@ -58,5 +58,11 @@
     "sort_order": 9,
     "title": "Truck Rate Manager",
     "remark": ""
+  },
+  "ord_do_allocation": {
+    "active": true,
+    "sort_order": 10,
+    "title": "ORD_DO_ALLOCATION",
+    "remark": ""
   }
 }

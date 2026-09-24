@@ -77,6 +77,37 @@ class RbacPlatformTests(unittest.TestCase):
         self.assertEqual(worker.get("/features/closing_report").status_code, 404)
         self.assertEqual(worker.post("/api/runs", json={"feature_id": "closing_report", "inputs": {}}).status_code, 404)
 
+    def test_admin_access_is_registry_driven_and_admin_role_is_assignable_but_immutable(self):
+        admin = self.platform.app.test_client()
+        self.assertEqual(self.login(admin, "admin", "admin-pass").status_code, 302)
+
+        for feature in self.platform.list_features():
+            self.assertTrue(self.platform.has_feature_access(feature["id"], "admin"))
+
+        dashboard = admin.get("/")
+        self.assertEqual(dashboard.status_code, 200)
+        settings = self.platform.load_feature_settings()
+        for feature in self.platform.list_features():
+            if settings[feature["id"]]["active"]:
+                self.assertIn(settings[feature["id"]]["title"].encode(), dashboard.data)
+
+        create_admin_role = admin.post("/api/roles", json={
+            "id": "admin", "name": "Admin", "remark": "", "feature_ids": [],
+        })
+        self.assertEqual(create_admin_role.status_code, 400)
+        create_user = admin.post("/api/account", json={
+            "user_id": "admin-role-user", "password": "test-password", "role_id": None,
+        })
+        self.assertEqual(create_user.status_code, 200)
+        self.assertEqual(
+            admin.post("/api/account/role", json={"user_id": "admin-role-user", "role_id": "admin"}).status_code,
+            200,
+        )
+        for feature in self.platform.list_features():
+            self.assertTrue(self.platform.has_feature_access(feature["id"], "admin-role-user"))
+        self.assertEqual(admin.put("/api/roles/admin", json={"name": "Admin", "remark": "", "feature_ids": []}).status_code, 400)
+        self.assertEqual(admin.delete("/api/roles/admin").status_code, 400)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,6 +16,7 @@ import features.sql_query as sql_query
 import features.eason_dfw_billing as eason_dfw_billing
 import features.eason_client_report as eason_client_report
 import features.ord_ae_closing as ord_ae_closing
+import features.ord_do_allocation as ord_do_allocation
 from features import get_feature, list_features
 from platform_config import env_value
 from run_service import cancel_run, get_run, list_runs, start_run
@@ -37,6 +38,8 @@ AUTH_CONFIG_PATH = os.environ.get("AUTH_CONFIG_PATH", os.path.join(BASE_DIR, "au
 ROLE_CONFIG_PATH = os.environ.get("ROLE_CONFIG_PATH", os.path.join(BASE_DIR, "roles_v4.json"))
 FEATURE_SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "feature_settings_v4.json")
 ROLE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+ADMIN_USER_ID = "admin"
+ADMIN_ROLE_ID = "admin"
 
 
 def _write_json_atomically(path, payload):
@@ -84,7 +87,7 @@ def migrate_auth_users():
         if not isinstance(favourites, list):
             favourites = []
             changed = True
-        role_id = None if user_id == "admin" or is_legacy else user.get("role_id")
+        role_id = None if user_id == ADMIN_USER_ID or is_legacy else user.get("role_id")
         if role_id is not None:
             role_id = str(role_id).strip() or None
         if user.get("role_id") != role_id:
@@ -121,6 +124,9 @@ def load_roles():
         if not ROLE_ID_PATTERN.fullmatch(role_id) or role_id in seen_ids:
             continue
         seen_ids.add(role_id)
+        # Admin is a built-in role. Do not honor a stale editable copy from disk.
+        if role_id == ADMIN_ROLE_ID:
+            continue
         name = str(item.get("name", "")).strip()
         if not name:
             continue
@@ -133,11 +139,19 @@ def load_roles():
             "remark": str(item.get("remark", "")).strip(),
             "feature_ids": sorted({str(feature_id) for feature_id in feature_ids} & valid_feature_ids),
         })
+    result.append({
+        "id": ADMIN_ROLE_ID,
+        "name": "admin",
+        "remark": "Built-in full access to every report and tool. Permissions cannot be changed.",
+        "feature_ids": sorted(valid_feature_ids),
+        "built_in": True,
+    })
     return sorted(result, key=lambda role: role["name"].lower())
 
 
 def save_roles(roles):
-    _write_json_atomically(ROLE_CONFIG_PATH, {"schema_version": 1, "roles": roles})
+    editable_roles = [role for role in roles if role.get("id") != ADMIN_ROLE_ID]
+    _write_json_atomically(ROLE_CONFIG_PATH, {"schema_version": 1, "roles": editable_roles})
 
 
 def get_role(role_id):
@@ -161,7 +175,7 @@ def load_auth_users():
                 "password_hash": password_hash,
                 "enabled": enabled,
                 "favourites": [str(feature_id) for feature_id in favourites],
-                "role_id": None if user_id == "admin" else item.get("role_id"),
+                "role_id": None if user_id == ADMIN_USER_ID else item.get("role_id"),
             })
     return users
 
@@ -281,18 +295,20 @@ def group_features_by_category(features):
 
 
 def is_admin_user():
-    return session.get("user_id") == "admin"
+    return session.get("user_id") == ADMIN_USER_ID
 
 
 def has_feature_access(feature_id, user_id=None):
     if not get_feature(feature_id):
         return False
     selected_user_id = user_id or session.get("user_id", "")
-    if selected_user_id == "admin":
+    # The built-in administrator is registry-driven: every current and future
+    # report/tool is available without a role configuration update.
+    if selected_user_id == ADMIN_USER_ID:
         return True
     user = get_auth_user(selected_user_id)
     role = get_role(user.get("role_id")) if user else None
-    return bool(role and feature_id in role["feature_ids"])
+    return bool(role and (role["id"] == ADMIN_ROLE_ID or feature_id in role["feature_ids"]))
 
 
 def can_manage_features():
@@ -317,6 +333,8 @@ FEATURE_ENDPOINTS = {
     "ord_ae_closing_search": "ord_ae_closing",
     "ord_ae_closing_preview": "ord_ae_closing",
     "ord_ae_closing_export": "ord_ae_closing",
+    "ord_do_allocation_generate": "ord_do_allocation",
+    "ord_do_allocation_download": "ord_do_allocation",
     "sql_query_start": "sql_query",
     "sql_query_status": "sql_query",
     "sql_query_cancel": "sql_query",
@@ -581,7 +599,7 @@ def update_account_role():
     role_id = str(role_id).strip() if role_id is not None else None
     if role_id and not get_role(role_id):
         return jsonify({"error": "Role not found"}), 400
-    if user_id == "admin":
+    if user_id == ADMIN_USER_ID:
         return jsonify({"error": "Admin role cannot be changed"}), 400
     users = load_auth_users()
     for user in users:
@@ -648,6 +666,8 @@ def validate_role_payload(payload, allow_id=False):
     role_id = str(payload.get("id", "")).strip()
     if allow_id and not ROLE_ID_PATTERN.fullmatch(role_id):
         raise ValueError("Role ID must use lowercase letters, numbers, hyphens, or underscores")
+    if allow_id and role_id == ADMIN_ROLE_ID:
+        raise ValueError("Admin is a built-in role and cannot be created manually")
     name = str(payload.get("name", "")).strip()
     remark = str(payload.get("remark", "")).strip()
     if not name or len(name) > 100:
@@ -701,6 +721,8 @@ def create_role():
 @require_login
 @require_feature_management
 def update_role(role_id):
+    if role_id == ADMIN_ROLE_ID:
+        return jsonify({"error": "Admin access is built in and cannot be changed"}), 400
     try:
         updates = validate_role_payload(request.get_json(silent=True) or {})
     except ValueError as exc:
@@ -718,6 +740,8 @@ def update_role(role_id):
 @require_login
 @require_feature_management
 def delete_role(role_id):
+    if role_id == ADMIN_ROLE_ID:
+        return jsonify({"error": "Admin access is built in and cannot be changed"}), 400
     if any(user.get("role_id") == role_id for user in load_auth_users()):
         return jsonify({"error": "Reassign accounts before deleting this role"}), 400
     roles = load_roles()
@@ -1023,6 +1047,31 @@ def ord_ae_closing_export(export_type):
         return jsonify({"error": str(exc)}), 400
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
+
+
+@app.post("/api/ord-do-allocation/generate")
+@require_login
+@require_feature_access("ord_do_allocation")
+def ord_do_allocation_generate():
+    try:
+        return jsonify(ord_do_allocation.generate_payload(
+            request.files.get("raw_workbook"), request.files.get("carrier_workbook"),
+        ))
+    except (ValueError, ord_do_allocation.ConverterError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.get("/download/ord-do-allocation/<filename>")
+@require_login
+@require_feature_access("ord_do_allocation")
+def ord_do_allocation_download(filename):
+    path = ord_do_allocation.output_path_for(filename)
+    if not path or not path.is_file():
+        abort(404)
+    return send_file(path, as_attachment=True, download_name=path.name,
+                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
 @app.post("/api/sql-query/runs")

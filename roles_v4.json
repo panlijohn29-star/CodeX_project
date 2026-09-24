@@ -2,23 +2,6 @@
   "schema_version": 1,
   "roles": [
     {
-      "id": "admin",
-      "name": "admin",
-      "remark": "everything",
-      "feature_ids": [
-        "ar_ap_breakdown",
-        "archive_currency_invoice",
-        "closing_report",
-        "eason_client_report",
-        "eason_dfw_billing",
-        "offset_invoice",
-        "ord_ae_closing",
-        "related_office_modification",
-        "sql_query",
-        "truck_rate"
-      ]
-    },
-    {
       "id": "op_billing_rpt",
       "name": "op_billing_rpt",
       "remark": "for OP",
