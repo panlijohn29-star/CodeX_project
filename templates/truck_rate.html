@@ -1,14 +1,146 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="{{ url_for('truck_rate_asset', asset_path='favicon.svg') }}" type="image/svg+xml">
   <title>{{ feature.title }} | Report Platform</title>
   <style>
-    :root{--navy:#153d5b;--blue:#1e6b9a;--muted:#697888;--bg:#f3f6f8}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:#162330;font:14px/1.45 "Segoe UI",Arial,sans-serif}.shell{max-width:1600px;margin:auto;padding:24px}.top{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:18px}a{color:var(--blue);text-decoration:none}.crumb,.meta,.subtitle{color:var(--muted);font-size:13px}h1{margin:4px 0;font-size:27px}.frame{display:block;width:100%;height:calc(100vh - 160px);min-height:720px;border:1px solid #d9e2e9;border-radius:12px;background:#fff;box-shadow:0 5px 18px #18364b0c}@media(max-width:680px){.shell{padding:14px}.top{flex-direction:column;margin-bottom:12px}.frame{height:calc(100vh - 150px);min-height:620px}}
+    :root{--navy:#153d5b;--blue:#1e6b9a;--muted:#697888;--bg:#f3f6f8}
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:#162330;font:14px/1.45 "Segoe UI",Arial,sans-serif}
+    .shell{max-width:1600px;margin:auto;padding:24px}
+    .top{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:18px}
+    a{color:var(--blue);text-decoration:none}
+    .crumb,.meta,.subtitle{color:var(--muted);font-size:13px}
+    h1{margin:4px 0;font-size:27px}
+    .meta{display:flex;align-items:center;gap:12px}
+    .log-button,.pager button{border:1px solid #bdd0dd;border-radius:6px;background:#fff;color:var(--navy);padding:7px 12px;font:inherit;cursor:pointer}
+    .log-button:hover,.pager button:hover:not(:disabled){background:#edf5f8}
+    .pager button:disabled{opacity:.45;cursor:default}
+    .frame{display:block;width:100%;height:calc(100vh - 160px);min-height:720px;border:1px solid #d9e2e9;border-radius:12px;background:#fff;box-shadow:0 5px 18px #18364b0c}
+    .log-dialog{width:min(840px,calc(100vw - 32px));max-height:min(85vh,900px);padding:0;border:0;border-radius:12px;box-shadow:0 20px 60px #1023384d}
+    .log-dialog::backdrop{background:#10233899}
+    .log-header{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #d9e2e9;padding:18px 22px}
+    .log-header h2{font-size:20px;margin:0}
+    .log-close{border:0;background:none;color:#53677a;font-size:25px;line-height:1;cursor:pointer}
+    .log-body{max-height:calc(85vh - 132px);overflow:auto;padding:12px 22px}
+    .log-entry{border-bottom:1px solid #e4ebf0;padding:14px 0}
+    .log-entry:last-child{border-bottom:0}
+    .log-entry-title{font-weight:700}
+    .log-entry-time{color:var(--muted);font-size:12px;margin-top:3px}
+    .log-change{margin:9px 0 0 16px;padding-left:12px;border-left:2px solid #d6e5eb}
+    .log-values{color:#475d70;font-size:13px;overflow-wrap:anywhere;margin-top:3px}
+    .log-empty{color:var(--muted);padding:28px 0;text-align:center}
+    .pager{display:flex;justify-content:space-between;align-items:center;gap:12px;border-top:1px solid #d9e2e9;padding:12px 22px}
+    .pager-controls{display:flex;gap:8px}
+    @media(max-width:680px){.shell{padding:14px}.top{flex-direction:column;margin-bottom:12px}.meta{flex-wrap:wrap}.frame{height:calc(100vh - 150px);min-height:620px}.log-body{padding:8px 16px}.log-header,.pager{padding:12px 16px}}
   </style>
 </head>
-<body><main class="shell">
-  <header class="top"><div><div class="crumb"><a href="/">Report Platform</a> / {{ feature.category }}</div><h1>{{ feature.title }}</h1><div class="subtitle">Rates and locations are stored locally in this browser.</div></div><div class="meta">Signed in as {{ user_id }} · <a href="/logout">Log out</a></div></header>
+<body>
+<main class="shell">
+  <header class="top">
+    <div>
+      <div class="crumb"><a href="/">Report Platform</a> / {{ feature.category }}</div>
+      <h1>{{ feature.title }}</h1>
+      <div class="subtitle">Rates and locations are saved in shared server storage.</div>
+    </div>
+    <div class="meta">
+      {% if can_view_truck_rate_log %}<button class="log-button" id="open-log" type="button">Operation Log</button>{% endif %}
+      <span>Signed in as {{ user_id }} · <a href="/logout">Log out</a></span>
+    </div>
+  </header>
   <iframe class="frame" title="Truck Rate Manager" src="{{ url_for('truck_rate_app') }}"></iframe>
-</main></body>
+</main>
+{% if can_view_truck_rate_log %}
+<dialog class="log-dialog" id="log-dialog" aria-labelledby="log-title">
+  <div class="log-header"><h2 id="log-title">Truck Rate Operation Log</h2><button class="log-close" id="close-log" type="button" aria-label="Close log">×</button></div>
+  <div class="log-body" id="log-body" aria-live="polite"></div>
+  <div class="pager">
+    <span id="log-page-label"></span>
+    <div class="pager-controls"><button id="log-prev" type="button">Previous</button><button id="log-next" type="button">Next</button></div>
+  </div>
+</dialog>
+<script>
+(() => {
+  const dialog = document.getElementById('log-dialog');
+  const body = document.getElementById('log-body');
+  const label = document.getElementById('log-page-label');
+  const previous = document.getElementById('log-prev');
+  const next = document.getElementById('log-next');
+  const fieldNames = {name:'Area name',group:'Group',ftlRate:'Per FTL rate',perKiloRate:'Per kilo rate',city:'City',state:'State',zip:'ZIP'};
+  let page = 1;
+  let total = 0;
+  const pageSize = 20;
+
+  function valueText(value) {
+    if (value === null || value === undefined || value === '') return '—';
+    return String(value);
+  }
+
+  function addText(parent, className, content) {
+    const element = document.createElement('div');
+    element.className = className;
+    element.textContent = content;
+    parent.appendChild(element);
+    return element;
+  }
+
+  function renderChange(parent, change) {
+    const row = document.createElement('div');
+    row.className = 'log-change';
+    const action = {added:'Added',updated:'Updated',deleted:'Deleted'}[change.action] || change.action;
+    const entity = change.entity === 'location' ? 'location' : 'area';
+    addText(row, 'log-entry-title', `${action} ${entity} · ${change.area || 'Unnamed area'}`);
+    const before = change.before || {};
+    const after = change.after || {};
+    for (const field of new Set([...Object.keys(before), ...Object.keys(after)])) {
+      const name = fieldNames[field] || field;
+      const detail = change.action === 'updated'
+        ? `${name}: ${valueText(before[field])} → ${valueText(after[field])}`
+        : `${name}: ${valueText((change.action === 'deleted' ? before : after)[field])}`;
+      addText(row, 'log-values', detail);
+    }
+    parent.appendChild(row);
+  }
+
+  async function loadPage(targetPage) {
+    body.replaceChildren();
+    addText(body, 'log-empty', 'Loading log…');
+    previous.disabled = true;
+    next.disabled = true;
+    try {
+      const response = await fetch(`/api/truck-rate/log?page=${targetPage}`, {credentials:'same-origin'});
+      if (!response.ok) throw new Error('Unable to load operation log.');
+      const result = await response.json();
+      page = result.page;
+      total = result.total;
+      body.replaceChildren();
+      if (!result.entries.length) addText(body, 'log-empty', 'No recorded changes yet.');
+      for (const entry of result.entries) {
+        const article = document.createElement('article');
+        article.className = 'log-entry';
+        addText(article, 'log-entry-title', `Revision ${entry.revision} · ${entry.user_id}`);
+        addText(article, 'log-entry-time', new Date(entry.timestamp).toLocaleString());
+        for (const change of entry.changes) renderChange(article, change);
+        body.appendChild(article);
+      }
+      label.textContent = total ? `Page ${page} of ${Math.ceil(total / pageSize)} · ${total} ${total === 1 ? 'save' : 'saves'}` : 'No saves';
+      previous.disabled = page <= 1;
+      next.disabled = page * pageSize >= total;
+    } catch (error) {
+      body.replaceChildren();
+      addText(body, 'log-empty', error.message);
+      label.textContent = '';
+    }
+  }
+
+  document.getElementById('open-log').addEventListener('click', () => { dialog.showModal(); loadPage(1); });
+  document.getElementById('close-log').addEventListener('click', () => dialog.close());
+  previous.addEventListener('click', () => loadPage(page - 1));
+  next.addEventListener('click', () => loadPage(page + 1));
+})();
+</script>
+{% endif %}
+</body>
 </html>

@@ -1,9 +1,17 @@
 from functools import wraps
+from contextlib import contextmanager
+from datetime import datetime, timezone
+import copy
 import json
 import os
 import re
 import shutil
 import tempfile
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 from flask import Flask, Response, abort, jsonify, redirect, render_template, request, send_file, send_from_directory, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -34,6 +42,11 @@ app.config.update(
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TRUCK_RATE_DIST_DIR = os.path.join(BASE_DIR, "static", "truck_rate")
+# Keep Truck Rate business data outside of versioned application assets. Set
+# TRUCK_RATE_DATA_PATH to a backed-up persistent directory in production.
+TRUCK_RATE_DATA_PATH = os.path.abspath(os.environ.get(
+    "TRUCK_RATE_DATA_PATH", os.path.join(BASE_DIR, "instance", "truck_rate_data.json")
+))
 AUTH_CONFIG_PATH = os.environ.get("AUTH_CONFIG_PATH", os.path.join(BASE_DIR, "auth_users_v4.json"))
 ROLE_CONFIG_PATH = os.environ.get("ROLE_CONFIG_PATH", os.path.join(BASE_DIR, "roles_v4.json"))
 FEATURE_SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "feature_settings_v4.json")
@@ -44,6 +57,7 @@ ADMIN_ROLE_ID = "admin"
 
 def _write_json_atomically(path, payload):
     directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
     fd, temporary_path = tempfile.mkstemp(prefix=".auth-", suffix=".json", dir=directory)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -184,6 +198,178 @@ def save_auth_users(users):
     _write_json_atomically(AUTH_CONFIG_PATH, {"schema_version": 2, "users": users})
 
 
+@contextmanager
+def _truck_rate_file_lock():
+    """Serialize saves across Flask workers using a separate, stable lock file."""
+    lock_path = TRUCK_RATE_DATA_PATH + ".lock"
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    with open(lock_path, "a+b") as handle:
+        if os.name == "nt":
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _truck_rate_area_fields(area):
+    return {field: area.get(field) for field in ("name", "group", "ftlRate", "perKiloRate")}
+
+
+def _truck_rate_location_fields(location):
+    return {field: location.get(field) for field in ("city", "state", "zip")}
+
+
+def _normalize_truck_rate_store_locations(store):
+    """Keep every persisted City and State value in uppercase."""
+    normalized = copy.deepcopy(store)
+    for area in normalized.get("areas", []) if isinstance(normalized, dict) else []:
+        if not isinstance(area, dict):
+            continue
+        for location in area.get("locations", []) if isinstance(area.get("locations"), list) else []:
+            if not isinstance(location, dict):
+                continue
+            for field in ("city", "state"):
+                if isinstance(location.get(field), str):
+                    location[field] = location[field].strip().upper()
+    return normalized
+
+
+def _validate_truck_rate_store(store):
+    if not isinstance(store, dict) or not isinstance(store.get("areas"), list):
+        raise ValueError("Truck Rate areas must be a list")
+    area_ids = set()
+    for area in store["areas"]:
+        if not isinstance(area, dict) or not isinstance(area.get("id"), str) or not isinstance(area.get("locations"), list):
+            raise ValueError("Truck Rate area is invalid")
+        if area["id"] in area_ids:
+            raise ValueError("Truck Rate area IDs must be unique")
+        area_ids.add(area["id"])
+        location_ids = set()
+        for location in area["locations"]:
+            if not isinstance(location, dict) or not isinstance(location.get("id"), str):
+                raise ValueError("Truck Rate location is invalid")
+            if location["id"] in location_ids:
+                raise ValueError("Truck Rate location IDs must be unique")
+            location_ids.add(location["id"])
+
+
+def _truck_rate_changes(before, after):
+    """Describe business changes; cached map coordinates are not user edits."""
+    changes = []
+    old_areas = {area["id"]: area for area in before.get("areas", []) if isinstance(area, dict) and "id" in area}
+    new_areas = {area["id"]: area for area in after.get("areas", []) if isinstance(area, dict) and "id" in area}
+    for area_id in dict.fromkeys([*old_areas, *new_areas]):
+        old_area = old_areas.get(area_id)
+        new_area = new_areas.get(area_id)
+        area_name = (new_area or old_area).get("name", "")
+        old_fields = _truck_rate_area_fields(old_area) if old_area else None
+        new_fields = _truck_rate_area_fields(new_area) if new_area else None
+        if old_fields != new_fields:
+            if old_fields and new_fields:
+                changed = [field for field in old_fields if old_fields[field] != new_fields[field]]
+                changes.append({"entity": "area", "action": "updated", "area": area_name,
+                                "before": {field: old_fields[field] for field in changed},
+                                "after": {field: new_fields[field] for field in changed}})
+            else:
+                changes.append({"entity": "area", "action": "added" if new_area else "deleted",
+                                "area": area_name, "before": old_fields, "after": new_fields})
+        old_locations = {loc["id"]: loc for loc in (old_area or {}).get("locations", [])
+                         if isinstance(loc, dict) and "id" in loc}
+        new_locations = {loc["id"]: loc for loc in (new_area or {}).get("locations", [])
+                         if isinstance(loc, dict) and "id" in loc}
+        for location_id in dict.fromkeys([*old_locations, *new_locations]):
+            old_location = old_locations.get(location_id)
+            new_location = new_locations.get(location_id)
+            old_values = _truck_rate_location_fields(old_location) if old_location else None
+            new_values = _truck_rate_location_fields(new_location) if new_location else None
+            if old_values == new_values:
+                continue
+            if old_values and new_values:
+                changed = [field for field in old_values if old_values[field] != new_values[field]]
+                changes.append({"entity": "location", "action": "updated", "area": area_name,
+                                "before": {field: old_values[field] for field in changed},
+                                "after": {field: new_values[field] for field in changed}})
+            else:
+                changes.append({"entity": "location", "action": "added" if new_location else "deleted",
+                                "area": area_name, "before": old_values, "after": new_values})
+    return changes
+
+
+def load_truck_rate_store():
+    """Read current data, accepting both earlier on-disk formats."""
+    try:
+        with open(TRUCK_RATE_DATA_PATH, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except FileNotFoundError:
+        return None
+    except json.JSONDecodeError as exc:
+        raise ValueError("Truck Rate data file is invalid") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("Truck Rate data file is invalid")
+    if payload.get("schema_version") in (1, 2):
+        if not isinstance(payload.get("store"), dict):
+            raise ValueError("Truck Rate data file is invalid")
+        revision = payload.get("revision", 0)
+        history = payload.get("history", [])
+        if type(revision) is int and revision >= 0 and isinstance(history, list):
+            return {"revision": revision, "store": payload["store"], "history": history}
+        raise ValueError("Truck Rate data file is invalid")
+    # Files created by the initial persistence release contained the store
+    # directly. Keep them usable and assign their first shared revision here.
+    return {"revision": 0, "store": payload, "history": []}
+
+
+def load_normalized_truck_rate_store():
+    """Migrate historical City/State casing without creating a user operation log."""
+    with _truck_rate_file_lock():
+        current = load_truck_rate_store()
+        if current is None:
+            return None
+        normalized_store = _normalize_truck_rate_store_locations(current["store"])
+        if normalized_store == current["store"]:
+            return current
+        saved = {
+            "revision": current["revision"] + 1,
+            "store": normalized_store,
+            "history": list(current["history"]),
+        }
+        _write_json_atomically(TRUCK_RATE_DATA_PATH, {"schema_version": 2, **saved})
+        return saved
+
+
+def save_truck_rate_store(store, expected_revision, user_id):
+    """Save only if no other user has changed the shared store first."""
+    if not isinstance(store, dict) or type(expected_revision) is not int or expected_revision < 0:
+        raise ValueError("Truck Rate data and revision are invalid")
+    store = _normalize_truck_rate_store_locations(store)
+    _validate_truck_rate_store(store)
+    with _truck_rate_file_lock():
+        current = load_truck_rate_store()
+        current_revision = current["revision"] if current else 0
+        if expected_revision != current_revision:
+            return None
+        before = current["store"] if current else {"areas": []}
+        changes = _truck_rate_changes(before, store)
+        if current and not changes and current["store"] == store:
+            return current
+        revision = current_revision + 1
+        history = list(current["history"] if current else [])
+        if changes:
+            history.append({"revision": revision, "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "user_id": user_id, "changes": changes})
+        saved = {"revision": revision, "store": store, "history": history}
+        _write_json_atomically(TRUCK_RATE_DATA_PATH, {"schema_version": 2, **saved})
+        return saved
+
+
 def public_auth_user(user):
     role = get_role(user.get("role_id"))
     return {
@@ -298,6 +484,14 @@ def is_admin_user():
     return session.get("user_id") == ADMIN_USER_ID
 
 
+def can_view_truck_rate_log():
+    user_id = session.get("user_id", "")
+    if user_id == ADMIN_USER_ID:
+        return True
+    user = get_auth_user(user_id)
+    return bool(user and user["enabled"] and user.get("role_id") == ADMIN_ROLE_ID)
+
+
 def has_feature_access(feature_id, user_id=None):
     if not get_feature(feature_id):
         return False
@@ -318,6 +512,8 @@ def can_manage_features():
 FEATURE_ENDPOINTS = {
     "truck_rate_app": "truck_rate",
     "truck_rate_asset": "truck_rate",
+    "truck_rate_store": "truck_rate",
+    "truck_rate_log": "truck_rate",
     "related_office_lookup": "related_office_modification",
     "related_office_company": "related_office_modification",
     "related_office_execute": "related_office_modification",
@@ -471,6 +667,7 @@ def feature_page(feature_id):
             db_profiles=feature.get("db_profiles", related_office_modification.ALLOWED_DB_PROFILES),
             sql_profiles=sql_query.discover_db_profiles() if feature["id"] == "sql_query" else [],
             user_id=session.get("user_id", "admin"),
+            can_view_truck_rate_log=can_view_truck_rate_log() if feature_id == "truck_rate" else False,
         )
     return render_template(
         "feature_run.html",
@@ -494,7 +691,11 @@ def truck_rate_app():
     with open(os.path.join(TRUCK_RATE_DIST_DIR, "index.html"), "r", encoding="utf-8") as handle:
         page = handle.read()
     api_key = json.dumps(env_value("TRUCK_RATE_GOOGLE_MAPS_API_KEY", "")).replace("<", "\\u003c")
-    page = page.replace("</head>", "<script>window.__TRUCK_RATE_GOOGLE_MAPS_API_KEY={0};</script></head>".format(api_key))
+    map_id = json.dumps(env_value("TRUCK_RATE_GOOGLE_MAP_ID", "")).replace("<", "\\u003c")
+    page = page.replace(
+        "</head>",
+        "<script>window.__TRUCK_RATE_GOOGLE_MAPS_API_KEY={0};window.__TRUCK_RATE_GOOGLE_MAP_ID={1};</script></head>".format(api_key, map_id),
+    )
     page = page.replace('"/assets/', '"/tools/truck-rate/assets/')
     page = page.replace('"/favicon.svg', '"/tools/truck-rate/favicon.svg')
     response = Response(page, mimetype="text/html")
@@ -509,6 +710,71 @@ def truck_rate_app():
 @require_feature_access("truck_rate")
 def truck_rate_asset(asset_path):
     return send_from_directory(TRUCK_RATE_DIST_DIR, asset_path)
+
+
+@app.route("/api/truck-rate/store", methods=["GET", "PUT"])
+@require_login
+@require_feature_access("truck_rate")
+def truck_rate_store():
+    if request.method == "GET":
+        try:
+            saved = load_normalized_truck_rate_store()
+        except (OSError, ValueError):
+            app.logger.exception("Unable to read Truck Rate data")
+            return jsonify({"error": "Truck Rate data could not be read"}), 500
+        return jsonify({
+            "exists": saved is not None,
+            "revision": saved["revision"] if saved else 0,
+            "store": saved["store"] if saved else None,
+        })
+
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Truck Rate data must be a JSON object"}), 400
+    store = payload.get("store")
+    expected_revision = payload.get("revision")
+    try:
+        saved = save_truck_rate_store(store, expected_revision, session.get("user_id", ""))
+    except ValueError as exc:
+        if str(exc) == "Truck Rate data file is invalid":
+            app.logger.exception("Unable to read Truck Rate data")
+            return jsonify({"error": "Truck Rate data could not be read"}), 500
+        return jsonify({"error": "Truck Rate data and revision are invalid"}), 400
+    except OSError:
+        app.logger.exception("Unable to save Truck Rate data")
+        return jsonify({"error": "Truck Rate data could not be saved"}), 500
+    if saved is None:
+        current = load_truck_rate_store()
+        return jsonify({
+            "error": "Truck Rate data was updated by another user",
+            "revision": current["revision"] if current else 0,
+            "store": current["store"] if current else None,
+        }), 409
+    return jsonify({"ok": True, "revision": saved["revision"], "store": saved["store"]})
+
+
+@app.get("/api/truck-rate/log")
+@require_login
+@require_feature_access("truck_rate")
+def truck_rate_log():
+    if not can_view_truck_rate_log():
+        abort(404)
+    try:
+        page = int(request.args.get("page", "1"))
+    except ValueError:
+        return jsonify({"error": "Page must be a positive integer"}), 400
+    if page < 1:
+        return jsonify({"error": "Page must be a positive integer"}), 400
+    try:
+        saved = load_truck_rate_store()
+    except (OSError, ValueError):
+        app.logger.exception("Unable to read Truck Rate log")
+        return jsonify({"error": "Truck Rate log could not be read"}), 500
+    history = saved["history"] if saved else []
+    page_size = 20
+    start = (page - 1) * page_size
+    return jsonify({"entries": list(reversed(history))[start:start + page_size],
+                    "page": page, "page_size": page_size, "total": len(history)})
 
 
 @app.post("/api/account/password")

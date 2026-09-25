@@ -31,6 +31,30 @@ SCDBCA_DATABASE=scdbca
 
 You can also override each profile independently with `SCDBUS_HOST`, `SCDBUS_USER`, `SCDBUS_PASSWORD`, `SCDBUS_PORT`, `SCDBCA_HOST`, `SCDBCA_USER`, `SCDBCA_PASSWORD`, and `SCDBCA_PORT`.
 
+Truck Rate Manager data is stored separately from deployed application code.
+In production, set `TRUCK_RATE_DATA_PATH` to an absolute, backed-up path outside
+the application folder (for example, `C:\\CodeX-data\\truck_rate_data.json`).
+Future platform updates then replace only code, not the shared areas, locations,
+or rates. The local default is `instance/truck_rate_data.json`. Concurrent edits
+use a revision check: a stale page is blocked from overwriting another user's
+save and reloads the latest shared data instead. Successful Area, rate, group,
+and location changes are recorded with the signed-in user, UTC time, and old/new
+values in the same persistent data file. The Operation Log on the Truck Rate page
+is available to the built-in admin and accounts assigned the `admin` role.
+
+### Truck Rate ZIP Map
+
+The ZIP Map always shows saved ZIP center points using the coordinates already
+verified when locations were added or imported. To also fill the actual ZIP Code
+boundaries, configure `TRUCK_RATE_GOOGLE_MAP_ID` and
+`TRUCK_RATE_GOOGLE_MAPS_API_KEY`. The Map ID must be a Google vector Map ID whose
+published style enables the **Postal Code** data-driven boundary layer. If this
+configuration, coverage, or an individual boundary is unavailable, the map keeps
+the ZIP points visible and explains why boundaries are unavailable. The app may
+store a Google postal-code place ID cache alongside the shared Truck Rate data;
+it is a system cache, not a business edit, and does not appear in the Operation
+Log.
+
 ## Features
 
 Features are registered through Python plugin modules. A feature declares:
