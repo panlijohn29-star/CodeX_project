@@ -158,7 +158,8 @@ def _safe_value(value):
 
 
 def _preview_sql(connection, sql, params):
-    return connection.escape_string(sql.replace("%s", "{}", len(params))).format(*[connection.escape_string(str(value)) for value in params])
+    with connection.cursor() as cursor:
+        return cursor.mogrify(sql, params)
 
 
 def _classify_search_values(connection, search_values, office, report_type, search_mode, job_type):
