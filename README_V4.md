@@ -1,14 +1,15 @@
 # Report Platform
 
-This branch upgrades the V4 closing report web app into a small Flask platform for multiple reports and internal tools.
+The V4 closing report web app is now a Flask platform for multiple reports and internal tools. See [README.md](README.md) for the current feature list, setup, configuration, Windows launcher behavior, and troubleshooting.
 
-The first platform feature is `closing_report`. It keeps the existing office selection, cancellable background run, Excel generation, zip download, login, password change, and admin account management.
+The `closing_report` feature keeps the existing office selection, cancellable background run, Excel generation, zip download, login, password change, and admin account management.
 
 ## Run
 
 ```powershell
-pip install -r requirements.txt
-copy .env.example .env
+python -m pip install -r requirements.txt
+if (!(Test-Path .env)) { Copy-Item .env.example .env }
+# Configure .env, including FLASK_SECRET_KEY, before starting.
 python app_v4.py
 ```
 
@@ -66,7 +67,7 @@ Features are registered through Python plugin modules. A feature declares:
 - `execute`
 - optional `cancel`
 
-The current plugin is implemented as `features/closing_report.py`.
+Current plugins are registered in `features/registry.py`; `features/closing_report.py` implements the original closing report.
 
 ## API
 
@@ -86,14 +87,9 @@ Legacy V4 endpoints for the closing report are still available:
 
 ## Accounts
 
-Login users are still configured in [auth_users_v4.json](C:\Users\JohnPan\Documents\CodeX_project\auth_users_v4.json).
+Login users are configured in `auth_users_v4.json`; roles and feature grants are configured in `roles_v4.json`.
 
-Default user:
-
-- ID: `admin`
-- Password: `admin88`
-
-Admin users can add users and enable or disable non-admin accounts from the dashboard. Any logged-in user can change their own password.
+The built-in administrator ID is `admin`; use your deployment's configured password. Startup does not create a default account or reset passwords. Only the built-in admin can manage non-admin accounts and assign roles. Accounts with no role can sign in but cannot access features. Any logged-in user can change their own password.
 
 ## Output
 
