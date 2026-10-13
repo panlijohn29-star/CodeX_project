@@ -14,7 +14,7 @@ A Flask-based internal report platform for running accounting and operations rep
 - `Eason Client Report`: search AP/AR charges by JOB_NO or HBL_NO for a billing office, with CSV export.
 - `ORD AE Closing Report`: review ORD air-export closing status and GP, then export results or a batch-closing file.
 - `ORD_DO_ALLOCATION`: allocate carrier PRO costs across ORD DO/IWT HBL rows and generate AP/AR upload workbooks.
-- `Truck Rate Manager`: manage shared areas, groups, locations, and rates, with a ZIP Map and administrator operation log.
+- `Truck Rate Manager`: manage pickups (name and address are editable), the delivery areas and ZIPs each pickup serves, and per-pickup rates, with a rate matrix, multi-pickup quote check, ZIP Map, and administrator operation log.
 
 ## Requirements
 
@@ -58,6 +58,27 @@ XC_DB_NAME=your-xc-database
 ### Truck Rate storage and ZIP Map
 
 Shared business data defaults to `instance/truck_rate_data.json`. For deployment, set `TRUCK_RATE_DATA_PATH` to an absolute path outside the application folder, for example `C:\CodeX-data\truck_rate_data.json`, and include it in backups. The application must be able to write to that directory. Concurrent saves use revision checks to prevent stale pages from overwriting newer changes. Successful business edits record the signed-in user, UTC time, and old/new values. The Operation Log is available to the built-in admin and accounts assigned the `admin` role.
+
+Rates belong to a pickup. Each pickup uses a zone set (its delivery areas and ZIPs); by default a pickup has its own, and pickups can share one when their areas are identical but their prices differ. Inside a zone set a State + ZIP belongs to one area and area names are unique. The first start after this upgrade converts single-pickup data automatically: a **Bensenville** pickup (1301 Devon Ave., Bensenville, IL 60106) is created, existing areas move into its zone set, and their rates become its rates. The previous file is kept beside the data as `truck_rate_data.pre-origins.json`. Pickup names and addresses can be edited in the app; changing an address re-locates it on the map but never changes rates.
+
+Rates have validity periods. Each price for a pickup and area has an optional **Effective from** and **Effective to** date (inclusive, America/Chicago calendar days, blank = no limit), and periods for the same pickup and area cannot overlap. Existing prices become open-ended periods on first start (the previous file is kept as `truck_rate_data.pre-periods.json`). A period is *Expiring soon* during its last 30 days and *Expired* after its end date. To keep using an expired price, use **Renew**: it copies the old prices into a new period (starting today by default; the gap stays unpriced unless you start on the day after the old one ended) and leaves the old period as history. **Extend** only moves the end date of a period that has not ended. Adding a period that starts inside a running one asks to end the running one the day before. Ended periods are locked: only administrators (the same accounts that see the Operation Log) can edit or delete them, and the server enforces this. The Rate matrix can show the prices valid on any date and renew many areas at once, optionally changing prices by a percentage. Quotes take a ship date and use the price valid that day.
+
+**Export All Data** and the daily backup use one row per pickup, area, validity period, and ZIP (`pickup, zone_set, area_name, group, ftl_rate, per_kilo_rate, effective_from, effective_to, city, state, zip`); **Export current rates** only includes the prices valid today. **Import CSV** reads columns by name and accepts the area template (`pickup, area_name, group, city, state, zip`), the rate template (`pickup, area_name, ftl_rate, per_kilo_rate, effective_from, effective_to`, dates as `2026-10-01` or `10/1/2026`), an Export All Data file, or the earlier single-pickup format (applied to the selected pickup). Importing a rate whose dates match an existing period updates it; otherwise it adds a period and, if it overlaps a running one, ends that one the day before and lists the change.
+
+The server's `backup_truck_rate.py` creates a CSV with the same columns and rows as **Export All Data**. It reads the shared data file under the same file lock used by the web app. Backups default to a `backups` folder beside `TRUCK_RATE_DATA_PATH`, with names such as `2026-10-08.csv`. It never overwrites an existing date. Set `TRUCK_RATE_BACKUP_DIR` to an absolute folder if needed. The date uses `America/Chicago` by default; `TRUCK_RATE_BACKUP_TZ` can change this. A missing or invalid source file makes the command fail instead of creating an empty backup.
+
+On the Ubuntu server, the user-level systemd files in `deploy/` run the script daily at 02:00 Chicago time, even if the web page is closed. Install them as `panlijohn` after deploying the script:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp deploy/truck-rate-backup.service deploy/truck-rate-backup.timer ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now truck-rate-backup.timer
+systemctl --user start truck-rate-backup.service  # create and verify today's backup
+systemctl --user list-timers truck-rate-backup.timer
+```
+
+Check failures with `journalctl --user -u truck-rate-backup.service -n 30`. If the server was off, the next run captures the current data and date; past-day snapshots cannot be reconstructed. The CSV covers business fields only, so keep the JSON data file in server backups too if the Operation Log and map caches must be recoverable.
 
 The ZIP Map uses saved location coordinates for ZIP center points. Optional ZIP boundaries require both `TRUCK_RATE_GOOGLE_MAPS_API_KEY` and `TRUCK_RATE_GOOGLE_MAP_ID`; the Map ID must be a vector Map ID with a published style enabling the **Postal Code** boundary layer. If configuration or boundary coverage is unavailable, ZIP points remain visible and the map explains the limitation. The postal-code place ID cache is system data and does not appear in the Operation Log. Keep real configuration values in `.env`.
 

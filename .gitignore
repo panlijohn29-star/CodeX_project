@@ -37,3 +37,7 @@ sql_scripts/
 # Local scratch files
 tmp/
 temp/
+
+# Local tooling artifacts
+.openchamber/
+.impeccable/

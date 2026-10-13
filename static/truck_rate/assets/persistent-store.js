@@ -68,6 +68,13 @@
         handleConflict(result);
         return;
       }
+      if (response.status === 400 || response.status === 403) {
+        // The server refused this change; reloading restores the last accepted shared data.
+        pendingValue = null;
+        window.alert(`${result.error || 'The server did not accept this change.'} The page will now reload the latest shared data.`);
+        window.location.reload();
+        return;
+      }
       if (!response.ok) throw new Error(result.error || 'Save failed.');
       useServerCopy(result);
     }).catch((error) => {

@@ -6,55 +6,69 @@
   <link rel="icon" href="{{ url_for('truck_rate_asset', asset_path='favicon.svg') }}" type="image/svg+xml">
   <title>{{ feature.title }} | Report Platform</title>
   <style>
-    :root{--navy:#153d5b;--blue:#1e6b9a;--muted:#697888;--bg:#f3f6f8}
+    @font-face{font-family:"Overpass";src:url("{{ url_for('truck_rate_asset', asset_path='fonts/overpass-latin-wght-normal.woff2') }}") format("woff2");font-weight:100 900;font-display:swap}
+    @font-face{font-family:"Overpass";src:local("Segoe UI"),local("Arial"),local("Helvetica");font-weight:100 900;unicode-range:U+00B7}
+    :root{--asphalt:#15191b;--asphalt-2:#2b3135;--on:#f3f5f4;--on-2:#b9c1bd;--ink:#14181b;--ink-2:#3f474c;--ink-3:#59625f;--line:#d4d8d5;--line-strong:#aeb4b0;--ground:#edefed;--sign:#006747;--warn:#f5c400;--stop:#b4232f;--apex:#7a1c22}
     *{box-sizing:border-box}
-    body{margin:0;background:var(--bg);color:#162330;font:14px/1.45 "Segoe UI",Arial,sans-serif}
-    .shell{max-width:1600px;margin:auto;padding:24px}
-    .top{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:18px}
-    a{color:var(--blue);text-decoration:none}
-    .crumb,.meta,.subtitle{color:var(--muted);font-size:13px}
-    h1{margin:4px 0;font-size:27px}
-    .meta{display:flex;align-items:center;gap:12px}
-    .log-button,.pager button{border:1px solid #bdd0dd;border-radius:6px;background:#fff;color:var(--navy);padding:7px 12px;font:inherit;cursor:pointer}
-    .log-button:hover,.pager button:hover:not(:disabled){background:#edf5f8}
-    .pager button:disabled{opacity:.45;cursor:default}
-    .frame{display:block;width:100%;height:calc(100vh - 160px);min-height:720px;border:1px solid #d9e2e9;border-radius:12px;background:#fff;box-shadow:0 5px 18px #18364b0c}
-    .log-dialog{width:min(840px,calc(100vw - 32px));max-height:min(85vh,900px);padding:0;border:0;border-radius:12px;box-shadow:0 20px 60px #1023384d}
-    .log-dialog::backdrop{background:#10233899}
-    .log-header{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #d9e2e9;padding:18px 22px}
-    .log-header h2{font-size:20px;margin:0}
-    .log-close{border:0;background:none;color:#53677a;font-size:25px;line-height:1;cursor:pointer}
-    .log-body{max-height:calc(85vh - 132px);overflow:auto;padding:12px 22px}
-    .log-entry{border-bottom:1px solid #e4ebf0;padding:14px 0}
+    html,body{height:100%}
+    body{margin:0;display:flex;flex-direction:column;background:var(--ground);color:var(--ink);font:14px/1.45 "Overpass","Segoe UI",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+    ::selection{background:var(--warn);color:var(--ink)}
+    :focus-visible{outline:2px solid var(--warn);outline-offset:2px}
+    .platform-bar{display:flex;align-items:center;justify-content:space-between;gap:6px 20px;flex-wrap:wrap;min-height:44px;padding:4px 28px 2px;color:var(--on-2);background:var(--asphalt);border-top:3px solid var(--apex);border-bottom:1px solid #000}
+    .platform-path{display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px;min-width:0;font-size:13px;font-weight:600}
+    .company{color:var(--on);font-weight:800;letter-spacing:.02em}
+    .sep{width:1px;height:16px;background:#4a5257}
+    .platform-bar a{color:var(--on);text-decoration:none;text-underline-offset:3px}
+    .platform-bar a:hover{text-decoration:underline}
+    .meta{display:flex;align-items:center;gap:14px;font-size:13px}
+    .saved-note{color:var(--on-2)}
+    .log-button{height:30px;padding:2px 12px 0;border:1px solid #5d666b;border-radius:6px;background:transparent;color:var(--on);font:inherit;font-weight:700;cursor:pointer}
+    .log-button:hover{border-color:#8a9399;background:var(--asphalt-2)}
+    .frame{display:block;flex:1;width:100%;min-height:680px;border:0;background:var(--ground)}
+    .log-dialog{width:min(840px,calc(100vw - 32px));max-height:min(85vh,900px);padding:0;border:0;border-radius:12px;color:var(--ink);font-family:inherit;box-shadow:0 24px 60px #14181b59}
+    .log-dialog::backdrop{background:#14181b8c}
+    .log-header{display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:1px solid var(--line);padding:16px 22px 14px}
+    .log-header h2{margin:0;font-size:21px;font-weight:800}
+    .log-close{display:grid;place-items:center;width:34px;height:34px;padding:0;border:0;border-radius:6px;background:none;color:var(--ink-2);cursor:pointer}
+    .log-close:hover{background:#dfe2df;color:var(--ink)}
+    .log-close svg{width:18px;height:18px}
+    .log-body{max-height:calc(85vh - 132px);overflow:auto;padding:6px 22px 12px}
+    .log-entry{border-bottom:1px solid var(--line);padding:14px 0}
     .log-entry:last-child{border-bottom:0}
-    .log-entry-title{font-weight:700}
-    .log-entry-time{color:var(--muted);font-size:12px;margin-top:3px}
-    .log-change{margin:9px 0 0 16px;padding-left:12px;border-left:2px solid #d6e5eb}
-    .log-values{color:#475d70;font-size:13px;overflow-wrap:anywhere;margin-top:3px}
-    .log-empty{color:var(--muted);padding:28px 0;text-align:center}
-    .pager{display:flex;justify-content:space-between;align-items:center;gap:12px;border-top:1px solid #d9e2e9;padding:12px 22px}
+    .log-entry-head{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:2px 12px}
+    .log-entry-title{font-weight:800}
+    .log-entry-time{color:var(--ink-3);font-size:12.5px;font-variant-numeric:tabular-nums}
+    .log-change{margin:10px 0 0;padding:9px 12px 7px;background:#f6f7f6;border:1px solid var(--line);border-radius:8px}
+    .log-change-title{display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-weight:700}
+    .plaque{display:inline-flex;padding:2px;border-radius:5px}
+    .plaque>span{display:block;padding:3px 7px 1px;border:1.5px solid currentColor;border-radius:3px;font-size:11px;font-weight:800;line-height:1.25;letter-spacing:.05em;text-transform:uppercase}
+    .plaque.added{color:#fff;background:var(--sign)}
+    .plaque.updated{color:var(--ink);background:var(--warn)}
+    .plaque.deleted{color:#fff;background:var(--stop)}
+    .log-values{color:var(--ink-2);font-size:13px;overflow-wrap:anywhere;margin-top:4px;font-variant-numeric:tabular-nums}
+    .log-empty{color:var(--ink-3);padding:28px 0;text-align:center}
+    .pager{display:flex;justify-content:space-between;align-items:center;gap:12px;border-top:1px solid var(--line);padding:12px 22px;color:var(--ink-2);font-size:13px;font-variant-numeric:tabular-nums}
     .pager-controls{display:flex;gap:8px}
-    @media(max-width:680px){.shell{padding:14px}.top{flex-direction:column;margin-bottom:12px}.meta{flex-wrap:wrap}.frame{height:calc(100vh - 150px);min-height:620px}.log-body{padding:8px 16px}.log-header,.pager{padding:12px 16px}}
+    .pager button{height:34px;padding:2px 14px 0;border:1px solid var(--line-strong);border-radius:6px;background:#fff;color:var(--ink);font:inherit;font-weight:700;cursor:pointer}
+    .pager button:hover:not(:disabled){border-color:var(--ink-2);background:#f6f7f6}
+    .pager button:disabled{opacity:.45;cursor:default}
+    .log-dialog :focus-visible{outline-color:var(--ink)}
+    @media(max-width:680px){.platform-bar{padding:6px 16px}.meta{flex-wrap:wrap;gap:8px 12px}.log-body{padding:6px 16px 10px}.log-header,.pager{padding:12px 16px}}
   </style>
 </head>
 <body>
-<main class="shell">
-  <header class="top">
-    <div>
-      <div class="crumb"><a href="/">Report Platform</a> / {{ feature.category }}</div>
-      <h1>{{ feature.title }}</h1>
-      <div class="subtitle">Rates and locations are saved in shared server storage.</div>
-    </div>
-    <div class="meta">
-      {% if can_view_truck_rate_log %}<button class="log-button" id="open-log" type="button">Operation Log</button>{% endif %}
-      <span>Signed in as {{ user_id }} · <a href="/logout">Log out</a></span>
-    </div>
-  </header>
-  <iframe class="frame" title="Truck Rate Manager" src="{{ url_for('truck_rate_app') }}"></iframe>
-</main>
+<header class="platform-bar">
+  <nav class="platform-path" aria-label="Breadcrumb"><span class="company">Apex Logistics</span><span class="sep" aria-hidden="true"></span><a href="/">Report Platform</a><span aria-hidden="true">/</span><span>{{ feature.category }}</span><span aria-hidden="true">/</span><span>{{ feature.title }}</span></nav>
+  <div class="meta">
+    <span class="saved-note">Changes save to shared server storage</span>
+    {% if can_view_truck_rate_log %}<button class="log-button" id="open-log" type="button">Operation Log</button>{% endif %}
+    <span>Signed in as {{ user_id }} · <a href="/logout">Log out</a></span>
+  </div>
+</header>
+<iframe class="frame" title="Truck Rate Manager" src="{{ url_for('truck_rate_app') }}"></iframe>
 {% if can_view_truck_rate_log %}
 <dialog class="log-dialog" id="log-dialog" aria-labelledby="log-title">
-  <div class="log-header"><h2 id="log-title">Truck Rate Operation Log</h2><button class="log-close" id="close-log" type="button" aria-label="Close log">×</button></div>
+  <div class="log-header"><h2 id="log-title">Truck Rate Operation Log</h2><button class="log-close" id="close-log" type="button" aria-label="Close log"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
   <div class="log-body" id="log-body" aria-live="polite"></div>
   <div class="pager">
     <span id="log-page-label"></span>
@@ -68,12 +82,14 @@
   const label = document.getElementById('log-page-label');
   const previous = document.getElementById('log-prev');
   const next = document.getElementById('log-next');
-  const fieldNames = {name:'Area name',group:'Group',ftlRate:'Per FTL rate',perKiloRate:'Per kilo rate',city:'City',state:'State',zip:'ZIP'};
+  const fieldNames = {name:'Name',group:'Group',ftlRate:'Per FTL rate',perKiloRate:'Per kilo rate',street:'Street address',city:'City',state:'State',zip:'ZIP',zoneSet:'Zone set',effectiveFrom:'Effective from',effectiveTo:'Effective to'};
+  const entityLabels = {origin:'pickup',zoneSet:'zone set',area:'area',location:'location',rate:'rate'};
   let page = 1;
   let total = 0;
   const pageSize = 20;
 
-  function valueText(value) {
+  function valueText(value, field) {
+    if ((value === null || value === undefined || value === '') && (field === 'effectiveFrom' || field === 'effectiveTo')) return 'no limit';
     if (value === null || value === undefined || value === '') return '—';
     return String(value);
   }
@@ -90,15 +106,30 @@
     const row = document.createElement('div');
     row.className = 'log-change';
     const action = {added:'Added',updated:'Updated',deleted:'Deleted'}[change.action] || change.action;
-    const entity = change.entity === 'location' ? 'location' : 'area';
-    addText(row, 'log-entry-title', `${action} ${entity} · ${change.area || 'Unnamed area'}`);
+    const entity = entityLabels[change.entity] || 'area';
+    const subject = change.entity === 'origin' ? (change.origin || 'Unnamed pickup')
+      : change.entity === 'zoneSet' ? (change.zoneSet || 'Unnamed zone set')
+      : change.entity === 'rate' ? `${change.origin || 'Unnamed pickup'} · ${change.area || 'Unnamed area'}`
+      : (change.area || 'Unnamed area');
+    const scope = ['area', 'location'].includes(change.entity) && change.zoneSet ? ` (${change.zoneSet})` : '';
+    const title = document.createElement('div');
+    title.className = 'log-change-title';
+    const plaque = document.createElement('span');
+    plaque.className = `plaque ${change.action}`;
+    const plaqueText = document.createElement('span');
+    plaqueText.textContent = action;
+    plaque.appendChild(plaqueText);
+    const text = document.createElement('span');
+    text.textContent = `${entity} · ${subject}${scope}`;
+    title.append(plaque, text);
+    row.appendChild(title);
     const before = change.before || {};
     const after = change.after || {};
     for (const field of new Set([...Object.keys(before), ...Object.keys(after)])) {
       const name = fieldNames[field] || field;
       const detail = change.action === 'updated'
-        ? `${name}: ${valueText(before[field])} → ${valueText(after[field])}`
-        : `${name}: ${valueText((change.action === 'deleted' ? before : after)[field])}`;
+        ? `${name}: ${valueText(before[field], field)} → ${valueText(after[field], field)}`
+        : `${name}: ${valueText((change.action === 'deleted' ? before : after)[field], field)}`;
       addText(row, 'log-values', detail);
     }
     parent.appendChild(row);
@@ -111,7 +142,7 @@
     next.disabled = true;
     try {
       const response = await fetch(`/api/truck-rate/log?page=${targetPage}`, {credentials:'same-origin'});
-      if (!response.ok) throw new Error('Unable to load operation log.');
+      if (!response.ok) throw new Error('The operation log could not be loaded. Close and reopen it to try again.');
       const result = await response.json();
       page = result.page;
       total = result.total;
@@ -120,8 +151,11 @@
       for (const entry of result.entries) {
         const article = document.createElement('article');
         article.className = 'log-entry';
-        addText(article, 'log-entry-title', `Revision ${entry.revision} · ${entry.user_id}`);
-        addText(article, 'log-entry-time', new Date(entry.timestamp).toLocaleString());
+        const head = document.createElement('div');
+        head.className = 'log-entry-head';
+        addText(head, 'log-entry-title', `Revision ${entry.revision} · ${entry.user_id}`);
+        addText(head, 'log-entry-time', new Date(entry.timestamp).toLocaleString());
+        article.appendChild(head);
         for (const change of entry.changes) renderChange(article, change);
         body.appendChild(article);
       }

@@ -1,8 +1,10 @@
 from functools import wraps
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 import copy
 import json
+import math
 import os
 import re
 import shutil
@@ -27,6 +29,8 @@ import features.ord_ae_closing as ord_ae_closing
 import features.ord_do_allocation as ord_do_allocation
 from features import get_feature, list_features
 from platform_config import env_value
+import truck_rate_places
+import truck_rate_zips
 from run_service import cancel_run, get_run, list_runs, start_run
 
 
@@ -219,17 +223,88 @@ def _truck_rate_file_lock():
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+DEFAULT_ORIGIN_ID = "origin-bensenville"
+DEFAULT_ZONE_SET_ID = "zoneset-bensenville"
+TRUCK_RATE_ORIGIN_FIELDS = ("name", "street", "city", "state", "zip")
+
+
 def _truck_rate_area_fields(area):
-    return {field: area.get(field) for field in ("name", "group", "ftlRate", "perKiloRate")}
+    return {field: area.get(field) for field in ("name", "group")}
 
 
 def _truck_rate_location_fields(location):
     return {field: location.get(field) for field in ("city", "state", "zip")}
 
 
+TRUCK_RATE_RATE_FIELDS = ("ftlRate", "perKiloRate", "effectiveFrom", "effectiveTo")
+
+
+def _truck_rate_rate_fields(rate):
+    return {field: rate.get(field) for field in TRUCK_RATE_RATE_FIELDS}
+
+
+def _truck_rate_dict_list(store, key):
+    values = store.get(key, []) if isinstance(store, dict) else []
+    return [value for value in values if isinstance(value, dict) and "id" in value] if isinstance(values, list) else []
+
+
+def _migrate_truck_rate_store(store):
+    """Upgrade the single-pickup format to pickups, zone sets and per-pickup rates.
+
+    Returns the same object when no upgrade is needed. The default pickup's
+    coordinates are approximate; the web app re-geocodes it if its address is edited.
+    """
+    if not isinstance(store, dict):
+        return store
+    if "origins" in store:
+        # Rates saved before validity periods existed have no id or dates: keep them open-ended.
+        existing_rates = store.get("rates")
+        if not isinstance(existing_rates, list) or all(not isinstance(rate, dict) or "id" in rate for rate in existing_rates):
+            return store
+        upgraded = copy.deepcopy(store)
+        for rate in upgraded["rates"]:
+            if isinstance(rate, dict):
+                rate.setdefault("id", "rate-{0}-{1}".format(rate.get("originId"), rate.get("areaId")))
+                rate.setdefault("effectiveFrom", "")
+                rate.setdefault("effectiveTo", "")
+        upgraded["version"] = 3
+        return upgraded
+    migrated = copy.deepcopy(store)
+    rates = []
+    for area in migrated.get("areas", []) if isinstance(migrated.get("areas"), list) else []:
+        if not isinstance(area, dict):
+            continue
+        ftl_rate = area.pop("ftlRate", "")
+        per_kilo_rate = area.pop("perKiloRate", "")
+        area["zoneSetId"] = DEFAULT_ZONE_SET_ID
+        if ftl_rate not in ("", None) or per_kilo_rate not in ("", None):
+            rates.append({"id": "rate-{0}-{1}".format(DEFAULT_ORIGIN_ID, area.get("id")),
+                          "originId": DEFAULT_ORIGIN_ID, "areaId": area.get("id"),
+                          "ftlRate": "" if ftl_rate is None else ftl_rate,
+                          "perKiloRate": "" if per_kilo_rate is None else per_kilo_rate,
+                          "effectiveFrom": "", "effectiveTo": ""})
+    migrated["version"] = 3
+    migrated["origins"] = [{"id": DEFAULT_ORIGIN_ID, "name": "Bensenville", "street": "1301 Devon Ave.",
+                            "city": "BENSENVILLE", "state": "IL", "zip": "60106", "lat": 41.99305, "lng": -87.9615,
+                            "zoneSetId": DEFAULT_ZONE_SET_ID}]
+    migrated["zoneSets"] = [{"id": DEFAULT_ZONE_SET_ID, "name": "Bensenville"}]
+    migrated["rates"] = rates
+    return migrated
+
+
 def _normalize_truck_rate_store_locations(store):
     """Keep every persisted City and State value in uppercase."""
     normalized = copy.deepcopy(store)
+    if isinstance(normalized, dict) and isinstance(normalized.get("origins"), list):
+        for origin in normalized["origins"]:
+            if not isinstance(origin, dict):
+                continue
+            for field in ("name", "street", "city", "state", "zip"):
+                if isinstance(origin.get(field), str):
+                    origin[field] = origin[field].strip()
+            for field in ("city", "state"):
+                if isinstance(origin.get(field), str):
+                    origin[field] = origin[field].upper()
     for area in normalized.get("areas", []) if isinstance(normalized, dict) else []:
         if not isinstance(area, dict):
             continue
@@ -242,16 +317,112 @@ def _normalize_truck_rate_store_locations(store):
     return normalized
 
 
+def _parse_rate_date(value):
+    """Blank means no limit; anything else must be a calendar date like 2026-10-08."""
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        raise ValueError("Truck Rate dates must look like YYYY-MM-DD")
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError("Truck Rate date is invalid") from exc
+
+
+def _truck_rate_today():
+    return datetime.now(ZoneInfo(env_value("TRUCK_RATE_BACKUP_TZ", "America/Chicago"))).date()
+
+
+class TruckRatePermissionError(Exception):
+    """A non-administrator tried to change a rate whose validity period has ended."""
+
+
+def _ended_rate_violations(before, after, today):
+    """Ended periods are history; only administrators may change or delete them."""
+    new_rates = {rate.get("id"): rate for rate in after.get("rates", []) if isinstance(rate, dict)} if isinstance(after, dict) else {}
+    new_origins = {item["id"] for item in _truck_rate_dict_list(after, "origins")}
+    new_areas = {item["id"] for item in _truck_rate_dict_list(after, "areas")}
+    violations = []
+    for old in before.get("rates", []) if isinstance(before, dict) and isinstance(before.get("rates"), list) else []:
+        if not isinstance(old, dict) or not old.get("effectiveTo"):
+            continue
+        try:
+            ended = _parse_rate_date(old["effectiveTo"]) < today
+        except ValueError:
+            continue
+        if not ended:
+            continue
+        new = new_rates.get(old.get("id"))
+        if new is None:
+            if old.get("originId") in new_origins and old.get("areaId") in new_areas:
+                violations.append(old)
+        elif any(new.get(field) != old.get(field) for field in TRUCK_RATE_RATE_FIELDS):
+            violations.append(old)
+    return violations
+
+
+def _valid_rate_value(value):
+    if value is None or value == "":
+        return True
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(number) and number >= 0
+
+
 def _validate_truck_rate_store(store):
     if not isinstance(store, dict) or not isinstance(store.get("areas"), list):
         raise ValueError("Truck Rate areas must be a list")
-    area_ids = set()
+    for key in ("origins", "zoneSets", "rates"):
+        if not isinstance(store.get(key), list):
+            raise ValueError("Truck Rate {0} must be a list".format(key))
+
+    presets = store.get("radiusPresets")
+    if presets is not None:
+        if not isinstance(presets, dict):
+            raise ValueError("Truck Rate radius presets must be an object")
+        for key, radii in presets.items():
+            if (not isinstance(key, str) or not isinstance(radii, list) or len(radii) > 10
+                    or any(isinstance(value, bool) or not isinstance(value, int)
+                           or not 1 <= value <= truck_rate_zips.MAX_RADIUS_MILES for value in radii)):
+                raise ValueError("Truck Rate radius presets are invalid")
+
+    zone_set_ids = set()
+    for zone_set in store["zoneSets"]:
+        if not isinstance(zone_set, dict) or not isinstance(zone_set.get("id"), str):
+            raise ValueError("Truck Rate zone set is invalid")
+        if zone_set["id"] in zone_set_ids:
+            raise ValueError("Truck Rate zone set IDs must be unique")
+        zone_set_ids.add(zone_set["id"])
+
+    origin_ids = {}
+    origin_names = set()
+    for origin in store["origins"]:
+        if not isinstance(origin, dict) or not isinstance(origin.get("id"), str):
+            raise ValueError("Truck Rate pickup is invalid")
+        if origin["id"] in origin_ids:
+            raise ValueError("Truck Rate pickup IDs must be unique")
+        name = origin.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("Truck Rate pickup name is required")
+        if name.strip().lower() in origin_names:
+            raise ValueError("Truck Rate pickup names must be unique")
+        origin_names.add(name.strip().lower())
+        if origin.get("zoneSetId") not in zone_set_ids:
+            raise ValueError("Truck Rate pickup zone set is invalid")
+        origin_ids[origin["id"]] = origin
+
+    area_zone_sets = {}
+    place_owners = {}
     for area in store["areas"]:
         if not isinstance(area, dict) or not isinstance(area.get("id"), str) or not isinstance(area.get("locations"), list):
             raise ValueError("Truck Rate area is invalid")
-        if area["id"] in area_ids:
+        if area["id"] in area_zone_sets:
             raise ValueError("Truck Rate area IDs must be unique")
-        area_ids.add(area["id"])
+        if area.get("zoneSetId") not in zone_set_ids:
+            raise ValueError("Truck Rate area zone set is invalid")
+        area_zone_sets[area["id"]] = area["zoneSetId"]
         location_ids = set()
         for location in area["locations"]:
             if not isinstance(location, dict) or not isinstance(location.get("id"), str):
@@ -259,47 +430,106 @@ def _validate_truck_rate_store(store):
             if location["id"] in location_ids:
                 raise ValueError("Truck Rate location IDs must be unique")
             location_ids.add(location["id"])
+            # One City + State + ZIP belongs to one area per zone set, so a quote never has two answers.
+            identity = (area["zoneSetId"], truck_rate_places.normalize_city(location.get("city")),
+                        str(location.get("state") or "").strip().upper(), str(location.get("zip") or "").strip())
+            if identity in place_owners:
+                raise ValueError("Truck Rate City, State and ZIP must be unique within a zone set")
+            place_owners[identity] = area["id"]
+
+    rate_ids = set()
+    periods = {}
+    for rate in store["rates"]:
+        if not isinstance(rate, dict) or not isinstance(rate.get("id"), str):
+            raise ValueError("Truck Rate rate is invalid")
+        if rate["id"] in rate_ids:
+            raise ValueError("Truck Rate rate IDs must be unique")
+        rate_ids.add(rate["id"])
+        origin = origin_ids.get(rate.get("originId"))
+        zone_set_id = area_zone_sets.get(rate.get("areaId"))
+        if origin is None or zone_set_id is None or origin["zoneSetId"] != zone_set_id:
+            raise ValueError("Truck Rate rate must match a pickup and an area in its zone set")
+        if not _valid_rate_value(rate.get("ftlRate")) or not _valid_rate_value(rate.get("perKiloRate")):
+            raise ValueError("Truck Rate values must be nonnegative numbers")
+        if rate.get("ftlRate") in (None, "") and rate.get("perKiloRate") in (None, ""):
+            raise ValueError("Truck Rate rate needs at least one price")
+        start, end = _parse_rate_date(rate.get("effectiveFrom")), _parse_rate_date(rate.get("effectiveTo"))
+        if start and end and start > end:
+            raise ValueError("Truck Rate effective dates are out of order")
+        periods.setdefault((rate["originId"], rate["areaId"]), []).append((start or date.min, end or date.max))
+    for intervals in periods.values():
+        intervals.sort()
+        for (_, previous_end), (next_start, _) in zip(intervals, intervals[1:]):
+            if next_start <= previous_end:
+                raise ValueError("Truck Rate validity periods must not overlap")
 
 
 def _truck_rate_changes(before, after):
     """Describe business changes; cached map coordinates are not user edits."""
     changes = []
-    old_areas = {area["id"]: area for area in before.get("areas", []) if isinstance(area, dict) and "id" in area}
-    new_areas = {area["id"]: area for area in after.get("areas", []) if isinstance(area, dict) and "id" in area}
+
+    def keyed(store, key):
+        return {item["id"]: item for item in _truck_rate_dict_list(store, key)}
+
+    old_zone_sets, new_zone_sets = keyed(before, "zoneSets"), keyed(after, "zoneSets")
+    old_origins, new_origins = keyed(before, "origins"), keyed(after, "origins")
+    old_areas, new_areas = keyed(before, "areas"), keyed(after, "areas")
+
+    def zone_set_name(zone_set_id):
+        zone_set = new_zone_sets.get(zone_set_id) or old_zone_sets.get(zone_set_id) or {}
+        return zone_set.get("name", "")
+
+    def diff(entity, old_item, new_item, fields_of, **context):
+        old_values = fields_of(old_item) if old_item else None
+        new_values = fields_of(new_item) if new_item else None
+        if old_values == new_values:
+            return
+        if old_values and new_values:
+            changed = [field for field in old_values if old_values[field] != new_values[field]]
+            changes.append({"entity": entity, "action": "updated", **context,
+                            "before": {field: old_values[field] for field in changed},
+                            "after": {field: new_values[field] for field in changed}})
+        else:
+            changes.append({"entity": entity, "action": "added" if new_item else "deleted", **context,
+                            "before": old_values, "after": new_values})
+
+    for zone_set_id in dict.fromkeys([*old_zone_sets, *new_zone_sets]):
+        old_zone_set, new_zone_set = old_zone_sets.get(zone_set_id), new_zone_sets.get(zone_set_id)
+        diff("zoneSet", old_zone_set, new_zone_set, lambda item: {"name": item.get("name")},
+             zoneSet=(new_zone_set or old_zone_set).get("name", ""))
+
+    def origin_fields(origin):
+        return {**{field: origin.get(field) for field in TRUCK_RATE_ORIGIN_FIELDS},
+                "zoneSet": zone_set_name(origin.get("zoneSetId"))}
+
+    for origin_id in dict.fromkeys([*old_origins, *new_origins]):
+        old_origin, new_origin = old_origins.get(origin_id), new_origins.get(origin_id)
+        diff("origin", old_origin, new_origin, origin_fields,
+             origin=(new_origin or old_origin).get("name", ""))
+
     for area_id in dict.fromkeys([*old_areas, *new_areas]):
         old_area = old_areas.get(area_id)
         new_area = new_areas.get(area_id)
         area_name = (new_area or old_area).get("name", "")
-        old_fields = _truck_rate_area_fields(old_area) if old_area else None
-        new_fields = _truck_rate_area_fields(new_area) if new_area else None
-        if old_fields != new_fields:
-            if old_fields and new_fields:
-                changed = [field for field in old_fields if old_fields[field] != new_fields[field]]
-                changes.append({"entity": "area", "action": "updated", "area": area_name,
-                                "before": {field: old_fields[field] for field in changed},
-                                "after": {field: new_fields[field] for field in changed}})
-            else:
-                changes.append({"entity": "area", "action": "added" if new_area else "deleted",
-                                "area": area_name, "before": old_fields, "after": new_fields})
-        old_locations = {loc["id"]: loc for loc in (old_area or {}).get("locations", [])
-                         if isinstance(loc, dict) and "id" in loc}
-        new_locations = {loc["id"]: loc for loc in (new_area or {}).get("locations", [])
-                         if isinstance(loc, dict) and "id" in loc}
+        zone_set = zone_set_name((new_area or old_area).get("zoneSetId"))
+        diff("area", old_area, new_area, _truck_rate_area_fields, area=area_name, zoneSet=zone_set)
+        old_locations = keyed(old_area or {}, "locations")
+        new_locations = keyed(new_area or {}, "locations")
         for location_id in dict.fromkeys([*old_locations, *new_locations]):
-            old_location = old_locations.get(location_id)
-            new_location = new_locations.get(location_id)
-            old_values = _truck_rate_location_fields(old_location) if old_location else None
-            new_values = _truck_rate_location_fields(new_location) if new_location else None
-            if old_values == new_values:
-                continue
-            if old_values and new_values:
-                changed = [field for field in old_values if old_values[field] != new_values[field]]
-                changes.append({"entity": "location", "action": "updated", "area": area_name,
-                                "before": {field: old_values[field] for field in changed},
-                                "after": {field: new_values[field] for field in changed}})
-            else:
-                changes.append({"entity": "location", "action": "added" if new_location else "deleted",
-                                "area": area_name, "before": old_values, "after": new_values})
+            diff("location", old_locations.get(location_id), new_locations.get(location_id),
+                 _truck_rate_location_fields, area=area_name, zoneSet=zone_set)
+
+    old_rates, new_rates = keyed(before, "rates"), keyed(after, "rates")
+    for rate_id in dict.fromkeys([*old_rates, *new_rates]):
+        old_rate, new_rate = old_rates.get(rate_id), new_rates.get(rate_id)
+        origin_id, area_id = (new_rate or old_rate).get("originId"), (new_rate or old_rate).get("areaId")
+        if new_rate is None and (origin_id not in new_origins or area_id not in new_areas):
+            continue  # Removed together with its pickup or area, which is already logged.
+        area = new_areas.get(area_id) or old_areas.get(area_id) or {}
+        origin = new_origins.get(origin_id) or old_origins.get(origin_id) or {}
+        diff("rate", old_rate, new_rate, _truck_rate_rate_fields,
+             area=area.get("name", ""), origin=origin.get("name", ""),
+             zoneSet=zone_set_name(area.get("zoneSetId")))
     return changes
 
 
@@ -333,9 +563,16 @@ def load_normalized_truck_rate_store():
         current = load_truck_rate_store()
         if current is None:
             return None
-        normalized_store = _normalize_truck_rate_store_locations(current["store"])
+        migrated_store = _migrate_truck_rate_store(current["store"])
+        normalized_store = _normalize_truck_rate_store_locations(migrated_store)
         if normalized_store == current["store"]:
             return current
+        if migrated_store is not current["store"]:
+            # Keep the copy from before the upgrade so it can be audited or reversed.
+            stage = "pre-origins" if "origins" not in current["store"] else "pre-periods"
+            backup_path = os.path.join(os.path.dirname(TRUCK_RATE_DATA_PATH), "truck_rate_data.{0}.json".format(stage))
+            if not os.path.exists(backup_path):
+                shutil.copy2(TRUCK_RATE_DATA_PATH, backup_path)
         saved = {
             "revision": current["revision"] + 1,
             "store": normalized_store,
@@ -345,20 +582,31 @@ def load_normalized_truck_rate_store():
         return saved
 
 
-def save_truck_rate_store(store, expected_revision, user_id):
+def save_truck_rate_store(store, expected_revision, user_id, can_edit_ended_rates=False):
     """Save only if no other user has changed the shared store first."""
     if not isinstance(store, dict) or type(expected_revision) is not int or expected_revision < 0:
         raise ValueError("Truck Rate data and revision are invalid")
-    store = _normalize_truck_rate_store_locations(store)
-    _validate_truck_rate_store(store)
+    legacy = "origins" not in store
+    if not legacy:
+        store = _normalize_truck_rate_store_locations(store)
+        _validate_truck_rate_store(store)
     with _truck_rate_file_lock():
         current = load_truck_rate_store()
         current_revision = current["revision"] if current else 0
         if expected_revision != current_revision:
             return None
-        before = current["store"] if current else {"areas": []}
+        if legacy:
+            # A single-pickup copy (an older browser tab or first-time local data) may only
+            # seed an empty server; it must never replace pickups and rates already saved.
+            if current:
+                raise ValueError("Truck Rate data and revision are invalid")
+            store = _normalize_truck_rate_store_locations(_migrate_truck_rate_store(store))
+            _validate_truck_rate_store(store)
+        before = _migrate_truck_rate_store(current["store"]) if current else {}
+        if not can_edit_ended_rates and _ended_rate_violations(before, store, _truck_rate_today()):
+            raise TruckRatePermissionError("Only an administrator can change or delete a rate whose validity has ended.")
         changes = _truck_rate_changes(before, store)
-        if current and not changes and current["store"] == store:
+        if current and not changes and before == store:
             return current
         revision = current_revision + 1
         history = list(current["history"] if current else [])
@@ -514,6 +762,10 @@ FEATURE_ENDPOINTS = {
     "truck_rate_asset": "truck_rate",
     "truck_rate_store": "truck_rate",
     "truck_rate_log": "truck_rate",
+    "truck_rate_zips_within": "truck_rate",
+    "truck_rate_preferences": "truck_rate",
+    "truck_rate_places_lookup": "truck_rate",
+    "truck_rate_city_suggest": "truck_rate",
     "related_office_lookup": "related_office_modification",
     "related_office_company": "related_office_modification",
     "related_office_execute": "related_office_modification",
@@ -694,7 +946,7 @@ def truck_rate_app():
     map_id = json.dumps(env_value("TRUCK_RATE_GOOGLE_MAP_ID", "")).replace("<", "\\u003c")
     page = page.replace(
         "</head>",
-        "<script>window.__TRUCK_RATE_GOOGLE_MAPS_API_KEY={0};window.__TRUCK_RATE_GOOGLE_MAP_ID={1};</script></head>".format(api_key, map_id),
+        "<script>window.__TRUCK_RATE_GOOGLE_MAPS_API_KEY={0};window.__TRUCK_RATE_GOOGLE_MAP_ID={1};window.__TRUCK_RATE_CAN_EDIT_ENDED_RATES={2};</script></head>".format(api_key, map_id, "true" if can_view_truck_rate_log() else "false"),
     )
     page = page.replace('"/assets/', '"/tools/truck-rate/assets/')
     page = page.replace('"/favicon.svg', '"/tools/truck-rate/favicon.svg')
@@ -734,7 +986,9 @@ def truck_rate_store():
     store = payload.get("store")
     expected_revision = payload.get("revision")
     try:
-        saved = save_truck_rate_store(store, expected_revision, session.get("user_id", ""))
+        saved = save_truck_rate_store(store, expected_revision, session.get("user_id", ""), can_view_truck_rate_log())
+    except TruckRatePermissionError as exc:
+        return jsonify({"error": str(exc)}), 403
     except ValueError as exc:
         if str(exc) == "Truck Rate data file is invalid":
             app.logger.exception("Unable to read Truck Rate data")
@@ -751,6 +1005,124 @@ def truck_rate_store():
             "store": current["store"] if current else None,
         }), 409
     return jsonify({"ok": True, "revision": saved["revision"], "store": saved["store"]})
+
+
+@app.get("/api/truck-rate/zips-within")
+@require_login
+@require_feature_access("truck_rate")
+def truck_rate_zips_within():
+    try:
+        lat = float(request.args["lat"])
+        lng = float(request.args["lng"])
+        miles = float(request.args["miles"])
+    except (KeyError, ValueError):
+        return jsonify({"error": "lat, lng and miles are required numbers"}), 400
+    if not (math.isfinite(lat) and math.isfinite(lng) and math.isfinite(miles)) or not -90 <= lat <= 90 or not -180 <= lng <= 180:
+        return jsonify({"error": "lat, lng and miles are required numbers"}), 400
+    if not 0 < miles <= truck_rate_zips.MAX_RADIUS_MILES:
+        return jsonify({"error": "miles must be between 0 and {0}".format(truck_rate_zips.MAX_RADIUS_MILES)}), 400
+    try:
+        zips = truck_rate_zips.zips_within(lat, lng, miles)
+    except OSError:
+        app.logger.exception("Unable to read the ZIP centroid data")
+        return jsonify({"error": "ZIP data could not be read"}), 500
+    return jsonify({"zips": zips})
+
+
+MAX_SAVED_RADIUS_CENTERS = 200
+
+
+def _truck_rate_prefs_path():
+    return os.path.join(os.path.dirname(TRUCK_RATE_DATA_PATH), "truck_rate_user_prefs.json")
+
+
+def _load_truck_rate_prefs():
+    try:
+        with open(_truck_rate_prefs_path(), "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _valid_radius_list(radii):
+    return (isinstance(radii, list) and 0 < len(radii) <= 10 and len(set(radii)) == len(radii)
+            and all(isinstance(value, int) and not isinstance(value, bool)
+                    and 1 <= value <= truck_rate_zips.MAX_RADIUS_MILES for value in radii))
+
+
+@app.route("/api/truck-rate/preferences", methods=["GET", "PUT"])
+@require_login
+@require_feature_access("truck_rate")
+def truck_rate_preferences():
+    """Radius choices remembered per signed-in user: the last selection and one per center."""
+    user_id = session.get("user_id", "")
+    if request.method == "GET":
+        try:
+            mine = _load_truck_rate_prefs().get(user_id, {})
+        except (OSError, ValueError):
+            app.logger.exception("Unable to read Truck Rate preferences")
+            return jsonify({"radius": {"last": None, "centers": {}}})
+        radius = mine.get("radius") if isinstance(mine, dict) else None
+        radius = radius if isinstance(radius, dict) else {}
+        return jsonify({"radius": {"last": radius.get("last"), "centers": radius.get("centers") or {}}})
+
+    payload = request.get_json(silent=True)
+    radii = payload.get("radii") if isinstance(payload, dict) else None
+    center = payload.get("center") if isinstance(payload, dict) else None
+    if not _valid_radius_list(radii) or (center is not None and (
+            not isinstance(center, str) or not re.fullmatch(r"pickup:[^\s]{1,80}|zip:[A-Z]{2}\|\d{5}", center))):
+        return jsonify({"error": "Radius choices must be 1 to 10 whole miles between 1 and {0}".format(
+            truck_rate_zips.MAX_RADIUS_MILES)}), 400
+    radii = sorted(radii)
+    try:
+        with _truck_rate_file_lock():
+            prefs = _load_truck_rate_prefs()
+            mine = prefs.get(user_id) if isinstance(prefs.get(user_id), dict) else {}
+            radius = mine.get("radius") if isinstance(mine.get("radius"), dict) else {}
+            centers = radius.get("centers") if isinstance(radius.get("centers"), dict) else {}
+            if center:
+                centers.pop(center, None)
+                centers[center] = radii
+                while len(centers) > MAX_SAVED_RADIUS_CENTERS:
+                    centers.pop(next(iter(centers)))
+            prefs[user_id] = {**mine, "radius": {"last": radii, "centers": centers}}
+            _write_json_atomically(_truck_rate_prefs_path(), prefs)
+    except (OSError, ValueError):
+        app.logger.exception("Unable to save Truck Rate preferences")
+        return jsonify({"error": "Preferences could not be saved"}), 500
+    return jsonify({"ok": True})
+
+
+@app.get("/api/truck-rate/places")
+@require_login
+@require_feature_access("truck_rate")
+def truck_rate_places_lookup():
+    city = request.args.get("city", "").strip()
+    state = request.args.get("state", "").strip()
+    zip_code = request.args.get("zip", "").strip()
+    if not (city or zip_code) or (zip_code and not re.fullmatch(r"\d{5}", zip_code)) or (state and not re.fullmatch(r"[A-Za-z]{2}", state)):
+        return jsonify({"error": "Enter a city or a five-digit ZIP, with an optional two-letter state"}), 400
+    try:
+        places = truck_rate_places.find_places(city, state, zip_code)
+    except OSError:
+        app.logger.exception("Unable to read the ZIP place data")
+        return jsonify({"error": "ZIP data could not be read"}), 500
+    return jsonify({"places": places, "truncated": len(places) >= truck_rate_places.MAX_RESULTS})
+
+
+@app.get("/api/truck-rate/city-suggest")
+@require_login
+@require_feature_access("truck_rate")
+def truck_rate_city_suggest():
+    state = request.args.get("state", "").strip()
+    if state and not re.fullmatch(r"[A-Za-z]{2}", state):
+        return jsonify({"cities": []})
+    try:
+        return jsonify({"cities": truck_rate_places.suggest_cities(request.args.get("q", ""), state)})
+    except OSError:
+        app.logger.exception("Unable to read the ZIP place data")
+        return jsonify({"cities": []})
 
 
 @app.get("/api/truck-rate/log")

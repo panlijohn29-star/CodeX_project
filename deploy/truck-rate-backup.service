@@ -1,0 +1,7 @@
+[Unit]
+Description=Back up Truck Rate Export All Data CSV
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/panlijohn/apps/codex_project
+ExecStart=/home/panlijohn/apps/codex_project/venv/bin/python /home/panlijohn/apps/codex_project/backup_truck_rate.py

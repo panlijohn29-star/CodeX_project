@@ -43,17 +43,40 @@
     return payload;
   }
 
-  function mapRecords(store, group) {
-    return (store.areas || []).flatMap((area, index) => (area.locations || []).map((location) => ({
+  const hasCoordinates = (item) => Number.isFinite(Number(item.lat)) && Number.isFinite(Number(item.lng));
+
+  // A pickup only serves the areas of its zone set, so the map shows one pickup at a time.
+  function areasFor(store, origin) {
+    return origin ? (store.areas || []).filter((area) => area.zoneSetId === origin.zoneSetId) : (store.areas || []);
+  }
+
+  const todayChicago = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+  const usDate = (iso) => `${iso.slice(5, 7)}/${iso.slice(8, 10)}/${iso.slice(0, 4)}`;
+
+  // The price valid today (America/Chicago); each pickup and area can have several validity periods.
+  function rateFor(store, origin, area) {
+    if (!origin) return {};
+    const today = todayChicago();
+    return (store.rates || []).find((rate) => rate.originId === origin.id && rate.areaId === area.id
+      && (!rate.effectiveFrom || rate.effectiveFrom <= today) && (!rate.effectiveTo || rate.effectiveTo >= today)) || {};
+  }
+
+  function mapRecords(store, origin, group) {
+    return areasFor(store, origin).flatMap((area, index) => (area.locations || []).map((location) => ({
       area,
       color: COLORS[index % COLORS.length],
       location,
+      rate: rateFor(store, origin, area),
     }))).filter((record) => !group || (record.area.group || 'Ungrouped') === group);
   }
 
   function details(record) {
-    const { area, location } = record;
-    return `<div class="zip-map-info"><strong>${escapeHtml(location.zip)}</strong><span>${escapeHtml(location.city)}, ${escapeHtml(location.state)}</span><span>${escapeHtml(areaLabel(area))}${area.group ? ` · ${escapeHtml(area.group)}` : ''}</span><span>FTL: ${escapeHtml(money(area.ftlRate))} · Per kg: ${escapeHtml(money(area.perKiloRate, '/kg'))}</span></div>`;
+    const { area, location, rate } = record;
+    return `<div class="zip-map-info"><strong>${escapeHtml(location.zip)}</strong><span>${escapeHtml(location.city)}, ${escapeHtml(location.state)}</span><span>${escapeHtml(areaLabel(area))}${area.group ? ` · ${escapeHtml(area.group)}` : ''}</span><span>FTL: ${escapeHtml(money(rate.ftlRate))} · Per kg: ${escapeHtml(money(rate.perKiloRate, '/kg'))}</span>${rate.effectiveTo ? `<span>Valid until ${escapeHtml(usDate(rate.effectiveTo))}</span>` : ''}</div>`;
+  }
+
+  function pickupDetails(origin) {
+    return `<div class="zip-map-info"><strong>Pickup: ${escapeHtml(origin.name)}</strong><span>${escapeHtml(origin.street)}</span><span>${escapeHtml(origin.city)}, ${escapeHtml(origin.state)} ${escapeHtml(origin.zip)}</span></div>`;
   }
 
   function createDialog() {
@@ -62,7 +85,8 @@
     dialog.innerHTML = `
       <div class="zip-map-shell">
         <aside class="zip-map-sidebar">
-          <div class="zip-map-title-row"><div><h2 id="zip-map-title">ZIP Map</h2><p>ZIPs are colored by Area/Zone.</p></div><button class="zip-map-close" type="button" aria-label="Close ZIP map">×</button></div>
+          <div class="zip-map-title-row"><div><h2 id="zip-map-title">ZIP Map</h2><p>ZIPs are colored by Area/Zone.</p></div><button class="zip-map-close" type="button" aria-label="Close ZIP map"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+          <label class="zip-map-control">Pickup <select class="zip-map-pickup" aria-label="Show ZIP map for pickup"></select></label>
           <label class="zip-map-control">Group <select class="zip-map-group" aria-label="Filter ZIP map by group"></select></label>
           <label class="zip-map-toggle"><input class="zip-map-points" type="checkbox" checked> Show ZIP points</label>
           <label class="zip-map-toggle"><input class="zip-map-boundaries" type="checkbox" checked> Show ZIP boundaries</label>
@@ -119,6 +143,7 @@
     const canvas = dialog.querySelector('.zip-map-canvas');
     const loading = dialog.querySelector('.zip-map-loading');
     const status = dialog.querySelector('.zip-map-status');
+    const pickupSelect = dialog.querySelector('.zip-map-pickup');
     const groupSelect = dialog.querySelector('.zip-map-group');
     const pointsToggle = dialog.querySelector('.zip-map-points');
     const boundariesToggle = dialog.querySelector('.zip-map-boundaries');
@@ -127,23 +152,42 @@
 
     try {
       const [maps, storePayload] = await Promise.all([loadMaps(), loadStore()]);
-      const allGroups = [...new Set((storePayload.store.areas || []).map((area) => area.group || 'Ungrouped'))].sort((a, b) => a.localeCompare(b));
-      groupSelect.innerHTML = `<option value="">All groups</option>${allGroups.map((group) => `<option value="${escapeHtml(group)}">${escapeHtml(group)}</option>`).join('')}`;
+      const origins = storePayload.store.origins || [];
+      let currentOrigin = origins.find((origin) => origin.id === localStorage.getItem('truck-rate-manager:origin')) || origins[0] || null;
+      pickupSelect.innerHTML = origins.map((origin) => `<option value="${escapeHtml(origin.id)}">${escapeHtml(origin.name)}</option>`).join('');
+      if (currentOrigin) pickupSelect.value = currentOrigin.id;
+      pickupSelect.closest('label').hidden = !origins.length;
+      function fillGroups() {
+        const groups = [...new Set(areasFor(storePayload.store, currentOrigin).map((area) => area.group || 'Ungrouped'))].sort((a, b) => a.localeCompare(b));
+        groupSelect.innerHTML = `<option value="">All groups</option>${groups.map((group) => `<option value="${escapeHtml(group)}">${escapeHtml(group)}</option>`).join('')}`;
+      }
+      fillGroups();
       const mapOptions = { mapTypeControl: false, streetViewControl: false, fullscreenControl: true };
       if (window.__TRUCK_RATE_GOOGLE_MAP_ID) mapOptions.mapId = window.__TRUCK_RATE_GOOGLE_MAP_ID;
       const map = new maps.Map(canvas, mapOptions);
       const infoWindow = new maps.InfoWindow();
       const markers = [];
+      const pickupMarkers = [];
       let boundaryLayer = null;
       let postalIds = {};
       let boundariesReady = false;
       let boundaryWarning = '';
 
-      function visibleRecords() { return mapRecords(storePayload.store, groupSelect.value); }
+      function visibleRecords() { return mapRecords(storePayload.store, currentOrigin, groupSelect.value); }
       function renderLegend(records) {
         const areas = new Map();
         records.forEach((record) => areas.set(record.area.id, record));
-        legend.innerHTML = '<h3>Area / Zone</h3>' + [...areas.values()].map((record) => `<div class="zip-map-legend-item"><span class="zip-map-swatch" style="background:${record.color}"></span><span>${escapeHtml(areaLabel(record.area))}</span></div>`).join('') || '<p class="zip-map-empty">No ZIPs in this group.</p>';
+        legend.innerHTML = '<h3>Area / Zone</h3>' + ([...areas.values()].map((record) => `<div class="zip-map-legend-item"><span class="zip-map-swatch" style="background:${record.color}"></span><span>${escapeHtml(areaLabel(record.area))}</span></div>`).join('') || '<p class="zip-map-empty">No ZIPs in this group.</p>')
+          + (origins.some(hasCoordinates) ? '<div class="zip-map-legend-item"><span class="zip-map-swatch" style="background:#10213f"></span><span>Pickup (selected)</span></div><div class="zip-map-legend-item"><span class="zip-map-swatch" style="background:#8da0b6"></span><span>Other pickups</span></div>' : '');
+      }
+      function renderPickupMarkers() {
+        pickupMarkers.splice(0).forEach((marker) => marker.setMap(null));
+        origins.filter(hasCoordinates).forEach((origin) => {
+          const selectedPickup = origin.id === currentOrigin?.id;
+          const marker = new maps.Marker({ map, position: { lat: Number(origin.lat), lng: Number(origin.lng) }, title: `Pickup · ${origin.name}`, zIndex: selectedPickup ? 1000 : 900, label: { text: 'P', color: '#ffffff', fontWeight: '700' }, icon: { path: maps.SymbolPath.CIRCLE, fillColor: selectedPickup ? '#10213f' : '#8da0b6', fillOpacity: 1, strokeColor: '#ffffff', strokeWeight: 2, scale: selectedPickup ? 12 : 9 } });
+          marker.addListener('click', () => { infoWindow.setContent(pickupDetails(origin)); infoWindow.open({ map, anchor: marker }); });
+          pickupMarkers.push(marker);
+        });
       }
       function renderMarkers(records) {
         markers.splice(0).forEach((marker) => marker.setMap(null));
@@ -157,6 +201,7 @@
       function fitPoints(records) {
         const bounds = new maps.LatLngBounds();
         records.filter((record) => Number.isFinite(Number(record.location.lat)) && Number.isFinite(Number(record.location.lng))).forEach((record) => bounds.extend({ lat: Number(record.location.lat), lng: Number(record.location.lng) }));
+        if (currentOrigin && hasCoordinates(currentOrigin)) bounds.extend({ lat: Number(currentOrigin.lat), lng: Number(currentOrigin.lng) });
         if (!bounds.isEmpty()) map.fitBounds(bounds, 42);
       }
       function applyBoundaryStyle(records) {
@@ -176,6 +221,7 @@
         const records = visibleRecords();
         renderLegend(records);
         renderMarkers(records);
+        renderPickupMarkers();
         applyBoundaryStyle(records);
         if (refit) fitPoints(records);
         const withoutCoordinates = records.filter((record) => !Number.isFinite(Number(record.location.lat)) || !Number.isFinite(Number(record.location.lng))).length;
@@ -183,6 +229,15 @@
         if (withoutCoordinates) setStatus(`${records.length - withoutCoordinates} ZIP points shown; ${withoutCoordinates} ZIP${withoutCoordinates === 1 ? '' : 's'} need coordinates.`);
       }
 
+      pickupSelect.addEventListener('change', async () => {
+        currentOrigin = origins.find((origin) => origin.id === pickupSelect.value) || currentOrigin;
+        fillGroups();
+        refresh({ refit: true });
+        if (boundariesReady) {
+          postalIds = await resolvePostalPlaceIds(maps, storePayload, mapRecords(storePayload.store, currentOrigin, ''), setStatus);
+          refresh();
+        }
+      });
       groupSelect.addEventListener('change', () => refresh({ refit: true }));
       pointsToggle.addEventListener('change', () => refresh());
       boundariesToggle.addEventListener('change', () => applyBoundaryStyle(visibleRecords()));
@@ -215,7 +270,7 @@
             const record = visibleRecords().find((item) => postalIds[`${item.location.state}|${item.location.zip}`] === event.features?.[0]?.placeId);
             if (record) { infoWindow.setContent(details(record)); infoWindow.setPosition(event.latLng); infoWindow.open(map); }
           });
-          postalIds = await resolvePostalPlaceIds(maps, storePayload, visibleRecords(), setStatus);
+          postalIds = await resolvePostalPlaceIds(maps, storePayload, mapRecords(storePayload.store, currentOrigin, ''), setStatus);
           refresh();
         }, 750);
       });
