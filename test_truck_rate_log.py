@@ -440,6 +440,48 @@ class TruckRateLogTests(unittest.TestCase):
                             area("Second", [place("b", "Saint Louis", "63101")], "area-2")])
         self.assertEqual(self.put(client, 1, other_area).status_code, 400)
 
+    def test_radius_remark_is_recorded_once_and_cannot_be_changed(self):
+        client = self.client()
+        radius = {"center": "pickup:origin-1", "text": "Center: Bensenville | Radius: 25 mi | Ring: 0-25 mi",
+                  "from": 0, "to": 25, "radii": [25]}
+        created = area(name="LAX_HAWTHORN")
+        created["radius"] = radius
+        created["remark"] = "Called carrier"
+        self.assertEqual(self.put(client, 0, store([created])).status_code, 200)
+
+        # The user's own note may change; the recorded radius line may not.
+        noted = json.loads(json.dumps(created))
+        noted["remark"] = "Rates agreed"
+        saved = self.put(client, 1, store([noted]))
+        self.assertEqual(saved.status_code, 200)
+        entries = client.get("/api/truck-rate/log").get_json()["entries"]
+        self.assertEqual(entries[0]["changes"][0]["after"], {"remark": "Rates agreed"})
+
+        for tampered in ({**noted, "radius": {**radius, "text": "edited"}}, {k: v for k, v in noted.items() if k != "radius"}):
+            rejected = self.put(client, 2, store([tampered]))
+            self.assertEqual(rejected.status_code, 400)
+            self.assertIn("radius remark", rejected.get_json()["error"])
+
+        # Deleting the whole area is still allowed.
+        self.assertEqual(self.put(client, 2, store([])).status_code, 200)
+
+    def test_new_area_names_must_be_unique_in_a_zone_set(self):
+        client = self.client()
+        self.assertEqual(self.put(client, 0, store([area(name="Chicago")])).status_code, 200)
+        duplicate = store([area(name="Chicago"), area(name=" chicago ", area_id="area-2")])
+        rejected = self.put(client, 1, duplicate)
+        self.assertEqual(rejected.status_code, 400)
+        self.assertIn("unique", rejected.get_json()["error"])
+        self.assertEqual(self.put(client, 1, store([area(name="Chicago"), area(name="Dallas", area_id="area-2")])).status_code, 200)
+
+    def test_area_remark_fields_are_validated(self):
+        client = self.client()
+        bad_remark = area()
+        bad_remark["remark"] = 5
+        bad_radius = area()
+        bad_radius["radius"] = {"text": 5}
+        for value in (bad_remark, bad_radius):
+            self.assertEqual(self.put(client, 0, store([value])).status_code, 400)
     def test_radius_choices_are_remembered_per_user(self):
         mine, other = self.client("admin"), self.client("panlijohn")
         self.assertEqual(mine.get("/api/truck-rate/preferences").get_json(), {"radius": {"last": None, "centers": {}}})
