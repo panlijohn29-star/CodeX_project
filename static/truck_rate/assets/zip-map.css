@@ -31,3 +31,20 @@
   .zip-map-legend { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .zip-map-legend h3 { grid-column: 1 / -1; }
 }
+
+/* Radius zone names, group picker and area Remark */
+.radius-controls .w-group { width: 220px; }
+.radius-controls .w-group > input { margin-top: 6px; }
+.radius-names { flex: 1 1 100%; min-width: 0; margin: 0; padding: 0; border: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 260px)); gap: 10px 14px; align-items: start; }
+.radius-names legend { padding: 0 0 8px; color: var(--ink-2); font-size: 13px; font-weight: 700; }
+.radius-names legend small { color: var(--ink-3); font-weight: 500; }
+.radius-name .field-label { font-variant-numeric: tabular-nums; }
+.radius-name.invalid input { border-color: var(--stop); box-shadow: 0 0 0 3px #b4232f26; }
+.name-problem { color: #8d1622; font-size: 13px; font-weight: 600; line-height: 1.35; }
+.remark-field textarea, .remark-section textarea { width: 100%; min-height: 72px; padding: 8px 11px; resize: vertical; font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--radius); outline: none; transition: border-color .15s, box-shadow .15s; }
+.remark-field textarea:hover { border-color: var(--ink-3); }
+.remark-field textarea:focus-visible { border-color: var(--ink); box-shadow: 0 0 0 3px #00674733; }
+.remark-section { margin: 18px 0; }
+.remark-line { display: flex; align-items: baseline; gap: 4px; margin: 0 0 6px; font-size: 14px; line-height: 1.45; overflow-wrap: anywhere; white-space: pre-wrap; }
+.remark-line.locked-line { padding: 8px 12px 8px 4px; background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius); color: var(--ink-2); user-select: text; }
+.remark-line .locked { flex: none; padding: 0 8px 0 6px; }

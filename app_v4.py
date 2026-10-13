@@ -229,7 +229,9 @@ TRUCK_RATE_ORIGIN_FIELDS = ("name", "street", "city", "state", "zip")
 
 
 def _truck_rate_area_fields(area):
-    return {field: area.get(field) for field in ("name", "group")}
+    radius = area.get("radius") if isinstance(area.get("radius"), dict) else {}
+    return {"name": area.get("name"), "group": area.get("group"),
+            "remark": area.get("remark") or "", "radiusRemark": radius.get("text") or ""}
 
 
 def _truck_rate_location_fields(location):
@@ -337,6 +339,10 @@ class TruckRatePermissionError(Exception):
     """A non-administrator tried to change a rate whose validity period has ended."""
 
 
+class TruckRateRuleError(ValueError):
+    """A change breaks a Truck Rate rule whose message is safe to show to the user."""
+
+
 def _ended_rate_violations(before, after, today):
     """Ended periods are history; only administrators may change or delete them."""
     new_rates = {rate.get("id"): rate for rate in after.get("rates", []) if isinstance(rate, dict)} if isinstance(after, dict) else {}
@@ -370,6 +376,26 @@ def _valid_rate_value(value):
         return False
     return math.isfinite(number) and number >= 0
 
+
+TRUCK_RATE_REMARK_MAX_LENGTH = 2000
+
+
+def _truck_rate_area_rule_violation(before, after):
+    """The radius remark is a permanent record, and new area names must not repeat in a zone set."""
+    old_areas = {area["id"]: area for area in _truck_rate_dict_list(before, "areas")}
+    owners = {}
+    for area in _truck_rate_dict_list(after, "areas"):
+        old_area = old_areas.get(area["id"])
+        if old_area is not None and old_area.get("radius") is not None and old_area["radius"] != area.get("radius"):
+            return "The radius remark of {0} was recorded when it was created and cannot be changed.".format(
+                old_area.get("name") or "this area")
+        key = (area.get("zoneSetId"), str(area.get("name") or "").strip().lower())
+        owners.setdefault(key, []).append(area["id"])
+    for area in _truck_rate_dict_list(after, "areas"):
+        key = (area.get("zoneSetId"), str(area.get("name") or "").strip().lower())
+        if area["id"] not in old_areas and len(owners[key]) > 1:
+            return "Area names must be unique within a pickup's zone set: {0}.".format(area.get("name"))
+    return None
 
 def _validate_truck_rate_store(store):
     if not isinstance(store, dict) or not isinstance(store.get("areas"), list):
@@ -423,6 +449,13 @@ def _validate_truck_rate_store(store):
         if area.get("zoneSetId") not in zone_set_ids:
             raise ValueError("Truck Rate area zone set is invalid")
         area_zone_sets[area["id"]] = area["zoneSetId"]
+        remark = area.get("remark")
+        if remark is not None and (not isinstance(remark, str) or len(remark) > TRUCK_RATE_REMARK_MAX_LENGTH):
+            raise ValueError("Truck Rate area remark is invalid")
+        radius = area.get("radius")
+        if radius is not None and (not isinstance(radius, dict) or not isinstance(radius.get("text"), str)
+                                   or len(radius["text"]) > TRUCK_RATE_REMARK_MAX_LENGTH):
+            raise ValueError("Truck Rate area radius remark is invalid")
         location_ids = set()
         for location in area["locations"]:
             if not isinstance(location, dict) or not isinstance(location.get("id"), str):
@@ -605,6 +638,9 @@ def save_truck_rate_store(store, expected_revision, user_id, can_edit_ended_rate
         before = _migrate_truck_rate_store(current["store"]) if current else {}
         if not can_edit_ended_rates and _ended_rate_violations(before, store, _truck_rate_today()):
             raise TruckRatePermissionError("Only an administrator can change or delete a rate whose validity has ended.")
+        violation = _truck_rate_area_rule_violation(before, store)
+        if violation:
+            raise TruckRateRuleError(violation)
         changes = _truck_rate_changes(before, store)
         if current and not changes and before == store:
             return current
@@ -989,6 +1025,8 @@ def truck_rate_store():
         saved = save_truck_rate_store(store, expected_revision, session.get("user_id", ""), can_view_truck_rate_log())
     except TruckRatePermissionError as exc:
         return jsonify({"error": str(exc)}), 403
+    except TruckRateRuleError as exc:
+        return jsonify({"error": str(exc)}), 400
     except ValueError as exc:
         if str(exc) == "Truck Rate data file is invalid":
             app.logger.exception("Unable to read Truck Rate data")
