@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "roles": [
+    {
+      "id": "op_billing_rpt",
+      "name": "op_billing_rpt",
+      "remark": "for OP",
+      "feature_ids": [
+        "closing_report",
+        "eason_client_report"
+      ]
+    },
+    {
+      "id": "ord_ae",
+      "name": "ord_ae",
+      "remark": "ord_ae",
+      "feature_ids": [
+        "ord_ae_closing"
+      ]
+    },
+    {
+      "name": "truck-rate",
+      "remark": "truck-rate",
+      "feature_ids": [
+        "truck_rate"
+      ],
+      "id": "truck-rate"
+    }
+  ]
+}

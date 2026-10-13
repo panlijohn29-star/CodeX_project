@@ -1,52 +1,96 @@
-# Closing Report Web App V4
+# Report Platform
 
-This version keeps the original web app intact and adds:
+The V4 closing report web app is now a Flask platform for multiple reports and internal tools. See [README.md](README.md) for the current feature list, setup, configuration, Windows launcher behavior, and troubleshooting.
 
-- office checkboxes with all offices selected by default
-- a stop button to cancel a running report
-- password-protected login
-- password change for the current user
-- enable or disable accounts from the admin screen
-
-## Login
-
-Login users are now configured in [auth_users_v4.json](C:\Users\JohnPan\Documents\CodeX_project\auth_users_v4.json).
-
-Default user:
-
-- ID: `admin`
-- Password: `admin88`
-
-Add more users by appending entries under `users`, for example:
-
-```json
-{
-  "users": [
-    { "user_id": "admin", "password": "admin88", "enabled": true },
-    { "user_id": "jackie", "password": "jackie123", "enabled": true },
-    { "user_id": "tom", "password": "tom456", "enabled": false }
-  ]
-}
-```
-
-## Account features
-
-- Any logged-in user can change their own password from the V4 homepage
-- Admin can add users and enable or disable non-admin accounts
-- Disabled accounts cannot log in
+The `closing_report` feature keeps the existing office selection, cancellable background run, Excel generation, zip download, login, password change, and admin account management.
 
 ## Run
 
 ```powershell
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
+if (!(Test-Path .env)) { Copy-Item .env.example .env }
+# Configure .env, including FLASK_SECRET_KEY, before starting.
 python app_v4.py
 ```
 
 Then open [http://localhost:5001](http://localhost:5001).
 
-## Notes
+## Configuration
 
-- The original app still remains in `app.py`
-- V4 run output is stored in `reports_v4/`
-- Cancellation is best-effort: the app requests stop immediately and closes active DB connections when possible
-- The report SQL is maintained in [closing_report_v4.sql](C:\Users\JohnPan\Documents\CodeX_project\closing_report_v4.sql)
+Runtime settings are loaded from environment variables. A local `.env` file is also supported and is intentionally ignored by Git.
+
+Required database settings:
+
+```text
+DB_HOST=your-mysql-host
+DB_PORT=3306
+DB_USER=your-user
+DB_PASSWORD=your-password
+SCDBUS_DATABASE=scdbus
+SCDBCA_DATABASE=scdbca
+```
+
+You can also override each profile independently with `SCDBUS_HOST`, `SCDBUS_USER`, `SCDBUS_PASSWORD`, `SCDBUS_PORT`, `SCDBCA_HOST`, `SCDBCA_USER`, `SCDBCA_PASSWORD`, and `SCDBCA_PORT`.
+
+Truck Rate Manager data is stored separately from deployed application code.
+In production, set `TRUCK_RATE_DATA_PATH` to an absolute, backed-up path outside
+the application folder (for example, `C:\\CodeX-data\\truck_rate_data.json`).
+Future platform updates then replace only code, not the shared areas, locations,
+or rates. The local default is `instance/truck_rate_data.json`. Concurrent edits
+use a revision check: a stale page is blocked from overwriting another user's
+save and reloads the latest shared data instead. Successful Area, rate, group,
+and location changes are recorded with the signed-in user, UTC time, and old/new
+values in the same persistent data file. The Operation Log on the Truck Rate page
+is available to the built-in admin and accounts assigned the `admin` role.
+
+### Truck Rate ZIP Map
+
+The ZIP Map always shows saved ZIP center points using the coordinates already
+verified when locations were added or imported. To also fill the actual ZIP Code
+boundaries, configure `TRUCK_RATE_GOOGLE_MAP_ID` and
+`TRUCK_RATE_GOOGLE_MAPS_API_KEY`. The Map ID must be a Google vector Map ID whose
+published style enables the **Postal Code** data-driven boundary layer. If this
+configuration, coverage, or an individual boundary is unavailable, the map keeps
+the ZIP points visible and explains why boundaries are unavailable. The app may
+store a Google postal-code place ID cache alongside the shared Truck Rate data;
+it is a system cache, not a business edit, and does not appear in the Operation
+Log.
+
+## Features
+
+Features are registered through Python plugin modules. A feature declares:
+
+- `id`, `title`, `category`, and `description`
+- `input_schema`
+- `validate_inputs`
+- `total_tasks`
+- `execute`
+- optional `cancel`
+
+Current plugins are registered in `features/registry.py`; `features/closing_report.py` implements the original closing report.
+
+## API
+
+- `GET /api/features`
+- `POST /api/runs`
+- `GET /api/runs`
+- `GET /api/runs/<run_id>`
+- `POST /api/runs/<run_id>/cancel`
+- `GET /download/<run_id>/<filename>`
+
+Legacy V4 endpoints for the closing report are still available:
+
+- `POST /api/run`
+- `GET /api/status/<run_id>`
+- `POST /api/cancel/<run_id>`
+- `GET /download/<run_id>`
+
+## Accounts
+
+Login users are configured in `auth_users_v4.json`; roles and feature grants are configured in `roles_v4.json`.
+
+The built-in administrator ID is `admin`; use your deployment's configured password. Startup does not create a default account or reset passwords. Only the built-in admin can manage non-admin accounts and assign roles. Accounts with no role can sign in but cannot access features. Any logged-in user can change their own password.
+
+## Output
+
+Run output is stored in `reports_v4/`. Each run writes a `manifest.json` containing platform fields such as `feature_id`, `feature_title`, `inputs_summary`, and `outputs`.

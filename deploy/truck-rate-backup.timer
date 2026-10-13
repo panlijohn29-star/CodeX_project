@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Truck Rate Export All Data backup
+
+[Timer]
+OnCalendar=*-*-* 02:00:00 America/Chicago
+Persistent=true
+Unit=truck-rate-backup.service
+
+[Install]
+WantedBy=timers.target

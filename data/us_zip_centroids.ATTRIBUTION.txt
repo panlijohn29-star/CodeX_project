@@ -1,0 +1,1 @@
+﻿US ZIP code centroids: GeoNames postal codes (https://download.geonames.org/export/zip/), licensed CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Columns: zip, city, state, lat, lng. Used by Truck Rate radius zone generation.

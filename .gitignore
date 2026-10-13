@@ -13,6 +13,7 @@ ENV/
 .env
 .env.*
 !.env.example
+auth_users_v4.json.pre_rbac_backup.json
 
 # Flask/runtime files
 instance/
@@ -31,7 +32,12 @@ build/
 
 # Generated report exports
 reports_v4/
+sql_scripts/
 
 # Local scratch files
 tmp/
 temp/
+
+# Local tooling artifacts
+.openchamber/
+.impeccable/

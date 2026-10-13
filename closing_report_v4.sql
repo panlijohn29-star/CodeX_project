@@ -36,10 +36,13 @@ SELECT * FROM
 				select cf_charges.job_id,SUM(EXCHANGE_USD) as REV, 0  as REV_CURR,
 				0 AS COST,0 AS COST_CURR,0 AS empty_close
 				from cf_charges
-				left join op_job on cf_charges.job_id = op_job.job_id
+-- 				left join op_job on cf_charges.job_id = op_job.job_id
 				where CF_CHARGES.COMPANY_CODE = {0} 
-				and CASE WHEN JOB_TYPE IN ('OI','AI') THEN (DATE_format(op_job.ETA,"%Y-%m-%d") >= DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-01-01'), INTERVAL 1 YEAR) AND DATE_format(op_job.ETA,"%Y-%m-%d") <= LAST_DAY(DATE_FORMAT(CURDATE(), '%Y-12-01')))
-				else (DATE_format(op_job.ETD,"%Y-%m-%d") >= DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-01-01'), INTERVAL 1 YEAR) AND DATE_format(op_job.ETD,"%Y-%m-%d") <= LAST_DAY(DATE_FORMAT(CURDATE(), '%Y-12-01'))) END
+-- 				and
+-- 				CASE WHEN JOB_TYPE IN ('OI','AI') THEN (DATE_format(op_job.ETA,"%Y-%m-%d") >= DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-01-01'), INTERVAL 1 YEAR)
+-- 				AND DATE_format(op_job.ETA,"%Y-%m-%d") <= LAST_DAY(DATE_FORMAT(CURDATE(), '%Y-12-01')))
+-- 				else (DATE_format(op_job.ETD,"%Y-%m-%d") >= DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-01-01'), INTERVAL 1 YEAR)
+-- 				AND DATE_format(op_job.ETD,"%Y-%m-%d") <= LAST_DAY(DATE_FORMAT(CURDATE(), '%Y-12-01'))) END
 				AND (CHARGE_TYPE NOT IN ('LDP00','LDPSJ','DSFSJ','SJ','HGGS','DUTY','HMF','MPF') and coalesce(cf_charges.CHARGE_CATEGORY,'') <> "paid on behalf")
 				and cf_charges.ACCOUNTING_PERIOD IS NOT NULL
 				group by cf_charges.job_id
@@ -49,10 +52,12 @@ SELECT * FROM
 				select cf_charges.job_id,0 as REV, 0 as REV_CURR,
 				SUM(EXCHANGE_USD) AS COST,0 AS COST_CURR,0 AS empty_close
 				from cf_cost cf_charges
-				left join op_job on cf_charges.job_id = op_job.job_id
+-- 				left join op_job on cf_charges.job_id = op_job.job_id
 				where CF_CHARGES.COMPANY_CODE = {0} 
-				and CASE WHEN JOB_TYPE IN ('OI','AI') THEN (DATE_format(op_job.ETA,"%Y-%m-%d") >= DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-01-01'), INTERVAL 1 YEAR) AND DATE_format(op_job.ETA,"%Y-%m-%d") <= LAST_DAY(DATE_FORMAT(CURDATE(), '%Y-12-01')))
-				else (DATE_format(op_job.ETD,"%Y-%m-%d") >= DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-01-01'), INTERVAL 1 YEAR) AND DATE_format(op_job.ETD,"%Y-%m-%d") <= LAST_DAY(DATE_FORMAT(CURDATE(), '%Y-12-01'))) END
+-- 				and CASE WHEN JOB_TYPE IN ('OI','AI') THEN (DATE_format(op_job.ETA,"%Y-%m-%d") >= DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-01-01'), INTERVAL 1 YEAR)
+-- 				AND DATE_format(op_job.ETA,"%Y-%m-%d") <= LAST_DAY(DATE_FORMAT(CURDATE(), '%Y-12-01')))
+-- 				else (DATE_format(op_job.ETD,"%Y-%m-%d") >= DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-01-01'), INTERVAL 1 YEAR)
+-- 				AND DATE_format(op_job.ETD,"%Y-%m-%d") <= LAST_DAY(DATE_FORMAT(CURDATE(), '%Y-12-01'))) END
 				AND (CHARGE_TYPE NOT IN ('LDP00','LDPSJ','DSFSJ','SJ','HGGS','DUTY','HMF','MPF') and coalesce(cf_charges.CHARGE_CATEGORY,'') <> "paid on behalf")
 				and cf_charges.ACCOUNTING_PERIOD is NOT NULL
 				group by cf_charges.job_id
@@ -64,8 +69,10 @@ SELECT * FROM
 				from cf_charges
 				left join op_job on cf_charges.job_id = op_job.job_id
 				where CF_CHARGES.COMPANY_CODE = {0} AND CF_CHARGES.ACCOUNTING_PERIOD IS NULL
-				and CASE WHEN JOB_TYPE IN ('OI','AI') THEN (DATE_format(op_job.ETA,"%Y-%m-%d") >= DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-01-01'), INTERVAL 1 YEAR) AND DATE_format(op_job.ETA,"%Y-%m-%d") <= LAST_DAY(DATE_FORMAT(CURDATE(), '%Y-12-01')) )
-				else (DATE_format(op_job.ETD,"%Y-%m-%d") >= DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-01-01'), INTERVAL 1 YEAR) AND DATE_format(op_job.ETD,"%Y-%m-%d") <= LAST_DAY(DATE_FORMAT(CURDATE(), '%Y-12-01')) ) END
+-- 				and CASE WHEN JOB_TYPE IN ('OI','AI') THEN (DATE_format(op_job.ETA,"%Y-%m-%d") >= DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-01-01'), INTERVAL 1 YEAR)
+-- 				AND DATE_format(op_job.ETA,"%Y-%m-%d") <= LAST_DAY(DATE_FORMAT(CURDATE(), '%Y-12-01')) )
+-- 				else (DATE_format(op_job.ETD,"%Y-%m-%d") >= DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-01-01'), INTERVAL 1 YEAR)
+-- 				AND DATE_format(op_job.ETD,"%Y-%m-%d") <= LAST_DAY(DATE_FORMAT(CURDATE(), '%Y-12-01')) ) END
 				AND ifnull(OP_JOB.JOB_SOURCE,'x') <>7			
 				UNION ALL
 				select CF_COST.job_id,0,0,
@@ -75,8 +82,10 @@ SELECT * FROM
 				from CF_COST
 				left join op_job on CF_COST.job_id = op_job.job_id
 				where CF_COST.COMPANY_CODE = {0} AND CF_COST.ACCOUNTING_PERIOD IS NULL
-				and CASE WHEN JOB_TYPE IN ('OI','AI') THEN (DATE_format(op_job.ETA,"%Y-%m-%d") >= DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-01-01'), INTERVAL 1 YEAR) AND DATE_format(op_job.ETA,"%Y-%m-%d") <= LAST_DAY(DATE_FORMAT(CURDATE(), '%Y-12-01')) )
-				else (DATE_format(op_job.ETD,"%Y-%m-%d") >= DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-01-01'), INTERVAL 1 YEAR) AND DATE_format(op_job.ETD,"%Y-%m-%d") <= LAST_DAY(DATE_FORMAT(CURDATE(), '%Y-12-01')) ) END
+-- 				and CASE WHEN JOB_TYPE IN ('OI','AI') THEN (DATE_format(op_job.ETA,"%Y-%m-%d") >= DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-01-01'), INTERVAL 1 YEAR)
+-- 				AND DATE_format(op_job.ETA,"%Y-%m-%d") <= LAST_DAY(DATE_FORMAT(CURDATE(), '%Y-12-01')) )
+-- 				else (DATE_format(op_job.ETD,"%Y-%m-%d") >= DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-01-01'), INTERVAL 1 YEAR)
+-- 				AND DATE_format(op_job.ETD,"%Y-%m-%d") <= LAST_DAY(DATE_FORMAT(CURDATE(), '%Y-12-01')) ) END
 				AND ifnull(OP_JOB.JOB_SOURCE,'x') <>7
 				
 				UNION ALL
@@ -101,7 +110,7 @@ SELECT * FROM
 					) b LEFT JOIN op_charges_belong ON b.job_id=op_charges_belong.JOB_ID
 				WHERE op_charges_belong.CHARGES_BELONG = {0} 
 				AND (op_charges_belong.B_CHECK_CHARGES IS NULL OR op_charges_belong.B_CHECK_CHARGES = 0
-				OR op_charges_belong.B_CHECK_COST IS NULL OR op_charges_belong.B_CHECK_CHARGES = 0)
+				OR op_charges_belong.B_CHECK_COST IS NULL OR op_charges_belong.B_CHECK_COST = 0)
 			)T
 			GROUP BY JOB_ID
 		)TT ON TT.JOB_ID = v_jobinfo.JOB_ID

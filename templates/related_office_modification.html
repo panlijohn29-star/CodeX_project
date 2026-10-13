@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ feature.title }} | Report Platform</title>
+  <style>
+    :root {
+      --bg: #f6f7f9;
+      --surface: #ffffff;
+      --ink: #17202a;
+      --muted: #607080;
+      --line: #d8dee6;
+      --accent: #145a7a;
+      --accent-dark: #0f435c;
+      --ok: #2e6b3a;
+      --bad: #a12727;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Arial, Helvetica, sans-serif; background: var(--bg); color: var(--ink); }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .shell { max-width: 1180px; margin: 0 auto; padding: 24px 20px 44px; }
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--line);
+    }
+    h1 { margin: 0; font-size: 28px; line-height: 1.2; }
+    h2 { margin: 0 0 14px; font-size: 18px; }
+    .muted, .meta, .status, .error { color: var(--muted); font-size: 14px; line-height: 1.45; }
+    .error { color: var(--bad); }
+    .success { color: var(--ok); }
+    .layout { display: grid; grid-template-columns: 0.85fr 1.15fr; gap: 20px; margin-top: 22px; }
+    .section {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 18px;
+    }
+    .field { display: grid; gap: 8px; margin-bottom: 14px; }
+    .field label, .choice-label { font-size: 14px; font-weight: 700; }
+    input[type="text"] {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      font-size: 14px;
+      background: #fff;
+    }
+    .profile-options { display: flex; flex-wrap: wrap; gap: 10px; }
+    .profile-option, .job-option {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+    }
+    .profile-option {
+      padding: 9px 12px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fbfcfd;
+    }
+    button {
+      border: 0;
+      background: var(--accent);
+      color: white;
+      padding: 10px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 700;
+    }
+    button.secondary { background: #607080; }
+    button.danger { background: #a12727; }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 16px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+    th, td { border-bottom: 1px solid var(--line); padding: 10px 8px; text-align: left; font-size: 14px; }
+    th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      background: #fbfcfd;
+      margin-top: 16px;
+    }
+    pre {
+      margin: 12px 0 0;
+      padding: 12px;
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #ffffff;
+      color: var(--ink);
+      font-size: 13px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .hidden { display: none; }
+    @media (max-width: 860px) {
+      .layout { grid-template-columns: 1fr; }
+      .topbar { align-items: flex-start; flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <div class="meta"><a href="/">Report Platform</a> / {{ feature.category }}</div>
+        <h1>{{ feature.title }}</h1>
+        <div class="muted">{{ feature.description }}</div>
+      </div>
+      <div class="muted">Signed in as {{ user_id }} | <a href="/logout">Log out</a></div>
+    </header>
+
+    <div class="layout">
+      <section class="section">
+        <h2>Lookup</h2>
+        <div class="field">
+          <div class="choice-label">Database</div>
+          <div class="profile-options">
+            {% for profile in db_profiles %}
+            <label class="profile-option">
+              <input type="radio" name="dbProfile" value="{{ profile }}" {% if loop.first %}checked{% endif %}>
+              <span>{{ "USA DB" if profile == "scdbus" else "Canada DB" if profile == "scdbca" else profile }}</span>
+            </label>
+            {% endfor %}
+          </div>
+        </div>
+        <div class="field">
+          <label for="hawbNo">HAWB#</label>
+          <input id="hawbNo" type="text" placeholder="LEA20260428" autocomplete="off">
+        </div>
+        <div class="actions">
+          <button id="lookupBtn" type="button">Search</button>
+          <button id="resetBtn" type="button" class="secondary">Reset</button>
+        </div>
+        <div id="statusText" class="status" style="margin-top:12px">Ready</div>
+      </section>
+
+      <section class="section">
+        <h2>Result</h2>
+        <div id="emptyState" class="muted">Enter a HAWB# and search to begin.</div>
+        <div id="resultPanel" class="hidden">
+          <div class="meta" id="resultMeta"></div>
+          <table>
+            <thead>
+              <tr>
+                <th>Related Job</th>
+                <th>HAWB_NO</th>
+                <th>job_no</th>
+                <th>JOB_ID</th>
+              </tr>
+            </thead>
+            <tbody id="resultRows"></tbody>
+          </table>
+          <div class="actions">
+            <button id="companyBtn" type="button">Check OP_COMPANY</button>
+          </div>
+        </div>
+
+        <div id="confirmPanel" class="panel hidden">
+          <strong>Confirm Related Office</strong>
+          <div id="confirmText" class="meta" style="margin-top:8px"></div>
+          <pre id="sqlPreview"></pre>
+          <div class="actions">
+            <button id="executeBtn" type="button" class="danger">Confirm and Execute</button>
+          </div>
+        </div>
+
+        <div id="finalPanel" class="panel hidden">
+          <strong id="finalTitle"></strong>
+          <div id="finalText" class="meta" style="margin-top:8px"></div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script>
+    const hawbNo = document.getElementById("hawbNo");
+    const lookupBtn = document.getElementById("lookupBtn");
+    const resetBtn = document.getElementById("resetBtn");
+    const statusText = document.getElementById("statusText");
+    const emptyState = document.getElementById("emptyState");
+    const resultPanel = document.getElementById("resultPanel");
+    const resultMeta = document.getElementById("resultMeta");
+    const resultRows = document.getElementById("resultRows");
+    const companyBtn = document.getElementById("companyBtn");
+    const confirmPanel = document.getElementById("confirmPanel");
+    const confirmText = document.getElementById("confirmText");
+    const sqlPreview = document.getElementById("sqlPreview");
+    const executeBtn = document.getElementById("executeBtn");
+    const finalPanel = document.getElementById("finalPanel");
+    const finalTitle = document.getElementById("finalTitle");
+    const finalText = document.getElementById("finalText");
+    let lookupResult = null;
+    let companyResult = null;
+
+    function escapeHtml(text) {
+      return String(text ?? "").replace(/[&<>"']/g, (char) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        "\"": "&quot;",
+        "'": "&#39;"
+      }[char]));
+    }
+
+    function selectedProfile() {
+      return document.querySelector('input[name="dbProfile"]:checked').value;
+    }
+
+    function selectedJobNo() {
+      const selected = document.querySelector('input[name="selectedJob"]:checked');
+      return selected ? selected.value : "";
+    }
+
+    function setBusy(isBusy) {
+      lookupBtn.disabled = isBusy;
+      companyBtn.disabled = isBusy;
+      executeBtn.disabled = isBusy;
+    }
+
+    function clearResult() {
+      lookupResult = null;
+      companyResult = null;
+      emptyState.classList.remove("hidden");
+      resultPanel.classList.add("hidden");
+      confirmPanel.classList.add("hidden");
+      finalPanel.classList.add("hidden");
+      resultRows.innerHTML = "";
+    }
+
+    function resetAll() {
+      hawbNo.value = "";
+      statusText.textContent = "Ready";
+      statusText.className = "status";
+      clearResult();
+    }
+
+    function showError(message) {
+      statusText.textContent = message || "Request failed";
+      statusText.className = "error";
+    }
+
+    function showStatus(message) {
+      statusText.textContent = message;
+      statusText.className = "status";
+    }
+
+    async function postJson(url, body) {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || "Request failed");
+      }
+      return payload;
+    }
+
+    function renderRows(payload) {
+      lookupResult = payload;
+      companyResult = null;
+      emptyState.classList.add("hidden");
+      resultPanel.classList.remove("hidden");
+      confirmPanel.classList.add("hidden");
+      finalPanel.classList.add("hidden");
+      resultMeta.textContent = `${payload.db_profile} / ${payload.hawb_no}`;
+      resultRows.innerHTML = payload.rows.map((row, index) => `
+        <tr>
+          <td>
+            <label class="job-option">
+              <input type="radio" name="selectedJob" value="${escapeHtml(row.job_no)}" ${index === 0 ? "checked" : ""}>
+              <span>Select</span>
+            </label>
+          </td>
+          <td>${escapeHtml(row.HAWB_NO)}</td>
+          <td>${escapeHtml(row.job_no)}</td>
+          <td>${escapeHtml(row.JOB_ID)}</td>
+        </tr>
+      `).join("");
+    }
+
+    function renderConfirmation(payload) {
+      companyResult = payload;
+      confirmPanel.classList.remove("hidden");
+      finalPanel.classList.add("hidden");
+      confirmText.innerHTML = `
+        Use <strong>${escapeHtml(payload.selected_job.job_no)}</strong>
+        OP_COMPANY <strong>${escapeHtml(payload.op_company)}</strong>
+        to generate related office in <strong>${escapeHtml(payload.db_profile)}</strong>?
+        The other job is <strong>${escapeHtml(payload.other_job.job_no)}</strong>
+        with JOB_ID <strong>${escapeHtml(payload.other_job.JOB_ID)}</strong>.
+      `;
+      sqlPreview.textContent = `call zdy_update_related_ai_job('${payload.selected_job.job_no}', '${payload.other_job.job_no}', '${payload.other_job.JOB_ID}', '${payload.op_company}')`;
+    }
+
+    lookupBtn.addEventListener("click", async () => {
+      clearResult();
+      setBusy(true);
+      showStatus("Searching...");
+      try {
+        const payload = await postJson("/api/related-office/lookup", {
+          db_profile: selectedProfile(),
+          hawb_no: hawbNo.value
+        });
+        renderRows(payload);
+        showStatus("Found 2 valid records. Select the job to become related job.");
+      } catch (error) {
+        showError(error.message);
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    companyBtn.addEventListener("click", async () => {
+      if (!lookupResult || !selectedJobNo()) {
+        showError("Please select a job");
+        return;
+      }
+      setBusy(true);
+      showStatus("Checking OP_COMPANY...");
+      try {
+        const payload = await postJson("/api/related-office/company", {
+          db_profile: lookupResult.db_profile,
+          hawb_no: lookupResult.hawb_no,
+          selected_job_no: selectedJobNo()
+        });
+        renderConfirmation(payload);
+        showStatus("Please confirm before executing.");
+      } catch (error) {
+        showError(error.message);
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    executeBtn.addEventListener("click", async () => {
+      if (!companyResult) {
+        showError("Please confirm OP_COMPANY first");
+        return;
+      }
+      setBusy(true);
+      showStatus("Executing stored procedure...");
+      try {
+        const payload = await postJson("/api/related-office/execute", {
+          db_profile: companyResult.db_profile,
+          hawb_no: companyResult.hawb_no,
+          selected_job_no: companyResult.selected_job.job_no,
+          confirmed_company_code: companyResult.op_company
+        });
+        finalPanel.classList.remove("hidden");
+        finalTitle.textContent = "Update succeeded";
+        finalTitle.className = "success";
+        finalText.textContent = `${payload.db_profile}: ${payload.selected_job.job_no} was processed with company ${payload.op_company}. Other job: ${payload.other_job.job_no}.`;
+        showStatus(payload.message || "Update succeeded");
+        statusText.className = "success";
+      } catch (error) {
+        finalPanel.classList.remove("hidden");
+        finalTitle.textContent = "Update failed";
+        finalTitle.className = "error";
+        finalText.textContent = error.message;
+        showError(error.message);
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    resetBtn.addEventListener("click", resetAll);
+    hawbNo.addEventListener("input", clearResult);
+    document.querySelectorAll('input[name="dbProfile"]').forEach((input) => {
+      input.addEventListener("change", clearResult);
+    });
+  </script>
+</body>
+</html>
