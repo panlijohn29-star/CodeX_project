@@ -23,7 +23,7 @@ Rates are modeled per pickup and per area with dated validity periods, so one lo
 ## Operating Context
 
 - A feature of the internal "Report Platform" (Flask app, `app_v4.py`); the page `templates/truck_rate.html` wraps the React app (source: `C:\Users\JohnPan\Documents\ChatGPT\TMS_TRUCK_RATE`, built into `static/truck_rate/`) in an iframe and hosts the admin-only Operation Log dialog.
-- `static/truck_rate/assets/persistent-store.js` syncs the app's localStorage store to shared server storage with revision checks; `zip-map.js` injects a "ZIP Map" button into the app header (`.header-actions`) and opens a Google Maps dialog colored by area.
+- `static/truck_rate/assets/persistent-store.js` syncs the app's localStorage store to shared server storage with revision checks; `zip-map.js` injects a "ZIP Map" button into the app header (`.header-actions`) and opens a Google Maps dialog colored by area; `tour.js` / `tour.css` add a "Tour" header button and a 15-step product tour (views, rate periods, areas and locations, pickups, data, ZIP Map) that auto-starts once per browser (localStorage key `truck-rate-manager:tour-done:v1`) and restores the user's view when it ends. The tour selects elements by app class names (`.view-tabs`, `.lookup`, `.gantry`, `.matrix-table`, `.matrix-counts`, `.area-index`, `.periods`, `.locations`, `.radius-view`, `.pickup-picker`, `details.menu`), so update its selectors if those change.
 - Calendar days are America/Chicago. Money is USD; weight is kg. Distances are straight-line miles (10–200 mile radius options).
 - Rates are exported as CSV (Export All Data, current rates) and backed up daily by `backup_truck_rate.py`.
 
