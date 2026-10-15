@@ -340,6 +340,8 @@ class TruckRateLogTests(unittest.TestCase):
         self.assertIn('window.__TRUCK_RATE_GOOGLE_MAP_ID="map-id"', page)
         self.assertIn('/tools/truck-rate/assets/zip-map.js?v=', page)
         self.assertIn('/tools/truck-rate/assets/zip-map.css?v=', page)
+        self.assertIn('/tools/truck-rate/assets/tour.js?v=', page)
+        self.assertIn('/tools/truck-rate/assets/tour.css?v=', page)
 
     def test_separate_processes_cannot_both_save_stale_revision(self):
         context = multiprocessing.get_context("spawn")
