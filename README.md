@@ -16,6 +16,8 @@ A Flask-based internal report platform for running accounting and operations rep
 - `ORD_DO_ALLOCATION`: allocate carrier PRO costs across ORD DO/IWT HBL rows and generate AP/AR upload workbooks.
 - `Truck Rate Manager`: manage pickups (name and address are editable), the delivery areas and ZIPs each pickup serves, and per-pickup rates, with a rate matrix, multi-pickup quote check, ZIP Map, and administrator operation log.
 
+- `PDF Field Extraction`: upload invoices, bills, and waybills (PDF, images, email, spreadsheets), extract fields with AI using per-vendor templates, review the results, and export to Excel or CSV. It is the former standalone PDF_EXTRACT app, served at `/tools/pdf-extract/` behind the platform login and feature grants; see `pdf_extract/` for its code. It is a Tools feature, so an administrator must grant it to a role.
+
 ## Requirements
 
 - Python 3.10+
@@ -82,6 +84,10 @@ Check failures with `journalctl --user -u truck-rate-backup.service -n 30`. If t
 
 The ZIP Map uses saved location coordinates for ZIP center points. Optional ZIP boundaries require both `TRUCK_RATE_GOOGLE_MAPS_API_KEY` and `TRUCK_RATE_GOOGLE_MAP_ID`; the Map ID must be a vector Map ID with a published style enabling the **Postal Code** boundary layer. If configuration or boundary coverage is unavailable, ZIP points remain visible and the map explains the limitation. The postal-code place ID cache is system data and does not appear in the Operation Log. Keep real configuration values in `.env`.
 
+### PDF Field Extraction
+
+Set `ANTHROPIC_API_KEY` (Claude) and/or `DEEPSEEK_API_KEY` (and optionally `DEEPSEEK_BASE_URL`) in `.env`, then restart. Its SQLite database and uploaded files are stored in `instance/pdf_extract/` by default; for deployment set `PDF_EXTRACT_DATA_DIR` to an absolute, backed-up path outside the application folder. To bring over data from the old standalone app, copy its `data/` folder contents (`app.db`, `uploads/`) into that directory while the platform is stopped. AI model settings, templates, and output formats are managed inside the tool's own Settings page.
+
 `SQL Query` discovers each valid `*_DATABASE` or `*_DB` profile. Submitted SQL runs with the configured MySQL account's privileges; terminating a query requires MySQL `KILL QUERY` permission. Query results and private scripts are stored in the ignored `reports_v4/` runtime directory. An administrator enables SQL access per account from the dashboard.
 
 ## Run
@@ -114,6 +120,7 @@ Set `FLASK_SECRET_KEY` in `.env` before starting the platform. For HTTPS deploym
 app_v4.py                  Flask web app and API routes
 features/                  Feature modules registered on the platform
 templates/                 HTML templates
+pdf_extract/               PDF Field Extraction app (FastAPI backend + frontend, mounted via a2wsgi)
 reports_v4/                Generated report output
 platform_config.py         Environment and database configuration
 run_service.py             Background run management for file-based reports

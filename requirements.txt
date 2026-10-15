@@ -8,3 +8,14 @@ PyMySQL>=1.1,<2.0
 pandas>=2.0,<3.0
 openpyxl>=3.1,<4.0
 XlsxWriter>=3.1,<4.0
+
+# PDF Field Extraction
+fastapi>=0.110
+a2wsgi>=1.10
+python-multipart
+pymupdf
+anthropic
+openai
+python-dotenv
+pillow
+extract-msg

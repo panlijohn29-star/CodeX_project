@@ -793,7 +793,10 @@ def can_manage_features():
     return is_admin_user()
 
 
+PDF_EXTRACT_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"]
+
 FEATURE_ENDPOINTS = {
+    "pdf_extract_proxy": "pdf_extract",
     "truck_rate_app": "truck_rate",
     "truck_rate_asset": "truck_rate",
     "truck_rate_store": "truck_rate",
@@ -998,6 +1001,23 @@ def truck_rate_app():
 @require_feature_access("truck_rate")
 def truck_rate_asset(asset_path):
     return send_from_directory(TRUCK_RATE_DIST_DIR, asset_path)
+
+
+PDF_EXTRACT_PREFIX = "/tools/pdf-extract"
+
+
+@app.route(PDF_EXTRACT_PREFIX + "/", defaults={"subpath": ""}, methods=PDF_EXTRACT_METHODS)
+@app.route(PDF_EXTRACT_PREFIX + "/<path:subpath>", methods=PDF_EXTRACT_METHODS)
+@require_login
+@require_feature_access("pdf_extract")
+def pdf_extract_proxy(subpath):
+    """Serve the PDF extraction app (page, assets, and /api/*) behind the platform login and feature grant."""
+    from pdf_extract.wsgi import get_wsgi_app
+
+    environ = request.environ.copy()
+    environ["SCRIPT_NAME"] = PDF_EXTRACT_PREFIX
+    environ["PATH_INFO"] = "/" + subpath
+    return Response.from_app(get_wsgi_app(), environ)
 
 
 @app.route("/api/truck-rate/store", methods=["GET", "PUT"])
