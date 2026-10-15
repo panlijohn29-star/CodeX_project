@@ -114,10 +114,27 @@ Only `admin` can add, enable/disable, and assign roles to non-admin accounts. Cr
 
 Set `FLASK_SECRET_KEY` in `.env` before starting the platform. For HTTPS deployment, set `SESSION_COOKIE_SECURE=true`; leave it false only for local HTTP development.
 
+## Restart Notice (scheduled upgrade / restart)
+
+`admin` and accounts with the `admin` role see a **Restart Notice** panel on the dashboard. Pick a restart time (optionally add a note) and click **Publish Countdown**. Every signed-in page, including Truck Rate and PDF Extract, then shows:
+
+| Time before restart | What users see |
+| --- | --- |
+| 5 minutes | Pop-up asking them to save their work (click "Got it" to dismiss; a small timer stays at the bottom right) |
+| 1 minute | A second, red pop-up |
+| 30 seconds | Full-screen countdown from 30 to 0 |
+| 0 | Maintenance mode: non-admin users get a "System maintenance" page that returns to the platform automatically once service resumes. Admins can still sign in |
+
+During the last 5 minutes new report runs and SQL queries are refused (running ones continue). The process does **not** exit at 0; deploy and restart as usual. Starting the app clears any stored plan, which ends maintenance mode. **Cancel Plan** also ends it. Countdowns use the server clock; open pages re-check every 5-15 seconds, so a cancelled plan disappears quickly. The plan is stored in `instance/maintenance_notice.json` (override with `MAINTENANCE_NOTICE_PATH`).
+
+API: `GET /api/maintenance` (any signed-in user), `POST /api/maintenance` with `{"restart_at": "<ISO time with offset>", "message": "..."}` and `DELETE /api/maintenance` (admin only).
+
 ## Project Structure
 
 ```text
 app_v4.py                  Flask web app and API routes
+maintenance_notice.py      Scheduled restart notice and maintenance mode
+static/maintenance_notice.js  Reminder pop-ups and countdown injected into every signed-in page
 features/                  Feature modules registered on the platform
 templates/                 HTML templates
 pdf_extract/               PDF Field Extraction app (FastAPI backend + frontend, mounted via a2wsgi)

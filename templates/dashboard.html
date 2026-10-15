@@ -260,6 +260,20 @@
         <div class="account-list" id="accountList" style="margin-top:12px"></div>
       </section>{% endif %}
     </div>
+
+    {% if can_manage_maintenance %}<section class="section" style="margin-top:20px">
+      <h2>Restart Notice</h2>
+      <div class="inline-form">
+        <div class="muted">Warn every signed-in user 5 minutes and 1 minute before the restart, show a 30-second countdown, then switch the platform to maintenance mode. New report and SQL runs are paused during the last 5 minutes.</div>
+        <input id="maintenanceTime" type="datetime-local" aria-label="Restart time">
+        <input id="maintenanceMessage" type="text" maxlength="300" placeholder="Optional note shown to users, e.g. System upgrade, back in about 10 minutes">
+        <div class="account-actions" style="justify-content:flex-start">
+          <button id="maintenancePublishBtn" type="button">Publish Countdown</button>
+          <button id="maintenanceCancelBtn" type="button" class="secondary" disabled>Cancel Plan</button>
+        </div>
+        <div class="status" id="maintenanceState">Loading...</div>
+      </div>
+    </section>{% endif %}
   </main>
 
   <script>
@@ -408,5 +422,81 @@
 
     renderAccounts();
   </script>
+  {% if can_manage_maintenance %}<script>
+    (function () {
+      const timeInput = document.getElementById("maintenanceTime");
+      const messageInput = document.getElementById("maintenanceMessage");
+      const publishBtn = document.getElementById("maintenancePublishBtn");
+      const cancelBtn = document.getElementById("maintenanceCancelBtn");
+      const stateEl = document.getElementById("maintenanceState");
+      let plan = null;
+      let offset = 0;
+
+      function localInputValue(date) {
+        const pad = (n) => String(n).padStart(2, "0");
+        return date.getFullYear() + "-" + pad(date.getMonth() + 1) + "-" + pad(date.getDate()) + "T" + pad(date.getHours()) + ":" + pad(date.getMinutes());
+      }
+
+      function clock(seconds) {
+        const total = Math.max(0, Math.ceil(seconds));
+        const minutes = Math.floor(total / 60);
+        return String(minutes).padStart(2, "0") + ":" + String(total % 60).padStart(2, "0");
+      }
+
+      function renderState() {
+        cancelBtn.disabled = !plan;
+        if (!plan) { stateEl.textContent = "No restart scheduled."; return; }
+        const left = plan.restart_at - (Date.now() + offset) / 1000;
+        const when = new Date(plan.restart_at * 1000).toLocaleString();
+        stateEl.textContent = left > 0
+          ? "Scheduled for " + when + " (" + clock(left) + " left, set by " + plan.created_by + ")"
+          : "Maintenance mode active since " + when + ". Restart the service to resume, or cancel the plan.";
+      }
+
+      function apply(data) {
+        offset = data.server_time * 1000 - Date.now();
+        plan = data.plan;
+        renderState();
+      }
+
+      async function refresh() {
+        try {
+          const response = await fetch("/api/maintenance", { cache: "no-store" });
+          if (response.ok) { apply(await response.json()); }
+        } catch (error) { /* keep the last known state */ }
+      }
+
+      publishBtn.addEventListener("click", async () => {
+        if (!timeInput.value) { stateEl.textContent = "Choose a restart time first."; return; }
+        const restartAt = new Date(timeInput.value);
+        if (plan && !confirm("Replace the existing restart plan?")) { return; }
+        publishBtn.disabled = true;
+        try {
+          const response = await fetch("/api/maintenance", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ restart_at: restartAt.toISOString(), message: messageInput.value })
+          });
+          const payload = await response.json();
+          if (!response.ok) { stateEl.textContent = payload.error || "Unable to publish"; return; }
+          apply(payload);
+        } finally {
+          publishBtn.disabled = false;
+        }
+      });
+
+      cancelBtn.addEventListener("click", async () => {
+        if (!confirm("Cancel the scheduled restart?")) { return; }
+        const response = await fetch("/api/maintenance", { method: "DELETE" });
+        const payload = await response.json();
+        if (response.ok) { apply(payload); }
+      });
+
+      timeInput.value = localInputValue(new Date(Date.now() + 15 * 60000));
+      refresh();
+      setInterval(refresh, 10000);
+      setInterval(renderState, 1000);
+    })();
+  </script>{% endif %}
 </body>
 </html>
