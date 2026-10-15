@@ -1,6 +1,7 @@
 from functools import wraps
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
+from html import escape as html_escape
 from zoneinfo import ZoneInfo
 import copy
 import json
@@ -28,6 +29,7 @@ import features.eason_client_report as eason_client_report
 import features.ord_ae_closing as ord_ae_closing
 import features.ord_do_allocation as ord_do_allocation
 from features import get_feature, list_features
+import maintenance_notice
 from platform_config import env_value
 import truck_rate_places
 import truck_rate_zips
@@ -844,6 +846,101 @@ def block_inactive_feature_endpoints():
         abort(404)
 
 
+NEW_TASK_ENDPOINTS = {"create_run", "create_run_v4_legacy", "sql_query_start"}
+MAINTENANCE_SCRIPT_MARKER = "data-maintenance-notice"
+maintenance_notice.clear_on_startup()
+
+MAINTENANCE_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>System maintenance</title>
+<style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#f6f7f9;color:#17202a;font-family:Arial,Helvetica,sans-serif}
+main{max-width:520px;margin:24px;padding:32px;background:#fff;border:1px solid #d8dee6;border-radius:8px;text-align:center}
+h1{margin:0 0 12px;font-size:24px}p{margin:8px 0;line-height:1.5;color:#607080}
+</style></head><body><main>
+<h1>System maintenance / 系统维护中</h1>
+<p>The platform is being upgraded or restarted. This page refreshes automatically when service resumes.</p>
+<p>平台正在升级或重启，服务恢复后本页面会自动刷新。</p>
+%MESSAGE%
+</main>
+<script>
+setInterval(function () {
+  fetch("/maintenance-status", { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (s) {
+    if (!s.maintenance) { window.location.href = "/"; }
+  }).catch(function () {});
+}, 10000);
+</script></body></html>"""
+
+
+def can_manage_maintenance():
+    return bool(session.get("authenticated")) and can_view_truck_rate_log()
+
+
+def maintenance_exempt():
+    if request.endpoint in ("static", "maintenance_status", "login", "logout"):
+        return True
+    return can_manage_maintenance()
+
+
+@app.before_request
+def enforce_maintenance_window():
+    if not maintenance_notice.is_new_work_blocked():
+        return None
+    if maintenance_notice.is_maintenance_active():
+        if maintenance_exempt():
+            return None
+        wants_json = request.path.startswith("/api/") or request.is_json
+        if wants_json:
+            return jsonify({"error": "System is under maintenance", "maintenance": True}), 503
+        plan = maintenance_notice.get_status()["plan"]
+        message = ""
+        if plan and plan["message"]:
+            message = "<p>{0}</p>".format(html_escape(plan["message"]))
+        response = Response(MAINTENANCE_PAGE.replace("%MESSAGE%", message), status=503, mimetype="text/html")
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Retry-After"] = "60"
+        return response
+    if request.method == "POST" and request.endpoint in NEW_TASK_ENDPOINTS:
+        remaining = int(maintenance_notice.remaining_seconds() or 0)
+        return jsonify({
+            "error": "The system will restart in about {0} min {1} s. New tasks are paused; please try again after the restart. "
+                     "系统即将重启，暂时无法发起新任务。".format(remaining // 60, remaining % 60),
+            "maintenance": True,
+        }), 503
+    return None
+
+
+@app.after_request
+def inject_maintenance_script(response):
+    """Add the reminder script to every signed-in HTML page, including embedded sub-apps."""
+    if (
+        not session.get("authenticated")
+        or response.status_code != 200
+        or response.mimetype != "text/html"
+        or response.headers.get("Content-Encoding")
+        or request.endpoint in ("static", "maintenance_status")
+    ):
+        return response
+    response.direct_passthrough = False
+    body = response.get_data(as_text=True)
+    if MAINTENANCE_SCRIPT_MARKER in body:
+        return response
+    tag = '<script src="{0}" {1} charset="utf-8" defer></script>'.format(maintenance_script_url(), MAINTENANCE_SCRIPT_MARKER)
+    index = body.lower().rfind("</body>")
+    body = body + tag if index < 0 else body[:index] + tag + body[index:]
+    response.set_data(body)
+    return response
+
+
+def maintenance_script_url():
+    path = os.path.join(BASE_DIR, "static", "maintenance_notice.js")
+    try:
+        version = int(os.path.getmtime(path))
+    except OSError:
+        version = 0
+    return "/static/maintenance_notice.js?v={0}".format(version)
+
+
 def require_feature_access(feature_id):
     """Hide an unassigned or unauthorized feature behind a 404 response."""
     def decorator(view_func):
@@ -918,6 +1015,50 @@ def logout():
     return redirect(url_for("login"))
 
 
+@app.get("/maintenance-status")
+def maintenance_status():
+    """Public, minimal probe used by the maintenance page to detect that service resumed."""
+    response = jsonify({"maintenance": maintenance_notice.is_maintenance_active()})
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.get("/api/maintenance")
+@require_login
+def maintenance_get():
+    payload = maintenance_notice.get_status()
+    payload["can_manage"] = can_manage_maintenance()
+    response = jsonify(payload)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.post("/api/maintenance")
+@require_login
+def maintenance_schedule():
+    if not can_manage_maintenance():
+        abort(404)
+    payload = request.get_json(silent=True) or {}
+    try:
+        status = maintenance_notice.schedule(
+            payload.get("restart_at"), payload.get("message"), session.get("user_id", "")
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    status["can_manage"] = True
+    return jsonify(status)
+
+
+@app.delete("/api/maintenance")
+@require_login
+def maintenance_cancel():
+    if not can_manage_maintenance():
+        abort(404)
+    status = maintenance_notice.cancel()
+    status["can_manage"] = True
+    return jsonify(status)
+
+
 @app.route("/")
 @require_login
 def index_v4():
@@ -933,6 +1074,7 @@ def index_v4():
         roles=load_roles() if is_admin_user() else [],
         is_admin=is_admin_user(),
         can_manage_features=can_manage_features(),
+        can_manage_maintenance=can_manage_maintenance(),
     )
 
 
