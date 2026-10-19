@@ -19,14 +19,6 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "").strip()
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip()
 
-def _shipped_own_companies() -> str:
-    """The company names that ship with the code (pdf_extract/own_companies.txt); the settings page can override them."""
-    try:
-        return (PACKAGE_DIR / "own_companies.txt").read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
-
-
 DEFAULT_SETTINGS = {
     "default_provider": "claude",
     "claude_model": "claude-sonnet-5-5",
@@ -41,7 +33,7 @@ DEFAULT_SETTINGS = {
     "mapping_model": "sonnet",
     # Our own company names (one per line or comma-separated). They are payer / recipient, never the vendor, when
     # batch auto-templating works out who issued a document.
-    "own_companies": _shipped_own_companies(),
+    "own_companies": "",
     "custom_base_url": "http://localhost:11434/v1",
     "custom_api_key": "ollama",
     "custom_model": "qwen2.5vl",
