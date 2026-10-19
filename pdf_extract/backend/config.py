@@ -24,6 +24,10 @@ DEFAULT_SETTINGS = {
     "claude_model": "claude-sonnet-5-5",
     "claude_fast_model": "claude-haiku-5-5",
     "deepseek_model": "deepseek-flash",
+    # Per vendor: the models fetched from its API (newest first) and the ids the administrator switched on.
+    # Only switched-on models are offered in the model drop-downs.
+    "model_catalog": {},
+    "enabled_models": {},
     # Model for "AI field mapping": a preset key from extractor.model_presets() (haiku / deepseek / sonnet / custom),
     # or "default" to follow the default extraction model.
     "mapping_model": "sonnet",

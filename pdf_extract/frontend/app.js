@@ -1078,10 +1078,19 @@ async function viewTemplate(id, params) {
       opt("default", L(() => pick(`默认（跟随设置：${settings.settings.claude_model}）`, `Default (from settings: ${settings.settings.claude_model})`)), modelKey()),
       presets.map((p) => opt(p.key, L(() => loc(p.label)), modelKey())),
       opt("manual", T("手动指定…", "Specify manually…"), modelKey()));
+    const manualInput = () => {
+      const options = (settings.model_options || {})[tpl.provider];
+      if (!Array.isArray(options)) return el("input", { type: "text", value: tpl.model, placeholder: pick("模型", "Model"), oninput: (e) => (tpl.model = e.target.value) });
+      const models = [...options];
+      if (tpl.model && !models.some((m) => m.id === tpl.model)) models.unshift({ id: tpl.model, name: tpl.model });
+      return el("select", { onchange: (e) => (tpl.model = e.target.value) },
+        opt("", pick("— 选择模型 —", "— choose a model —"), tpl.model),
+        ...models.map((m) => opt(m.id, m.name && m.name !== m.id ? `${m.id}（${m.name}）` : m.id, tpl.model)));
+    };
     const manualModel = modelKey() === "manual" ? el("div", { class: "row", style: "flex-wrap:nowrap" },
-      el("select", { onchange: (e) => (tpl.provider = e.target.value) },
+      el("select", { onchange: (e) => { tpl.provider = e.target.value; tpl.model = ""; render(); } },
         opt("claude", "Claude", tpl.provider), opt("deepseek", "DeepSeek", tpl.provider), opt("custom", T("自定义 / Ollama", "Custom / Ollama"), tpl.provider)),
-      el("input", { type: "text", value: tpl.model, placeholder: T("型号", "Model"), oninput: (e) => (tpl.model = e.target.value) })) : el("div");
+      manualInput()) : el("div");
     const testBtn = el("button", { onclick: () => guarded(testBtn, async () => {
       if (!docId) throw new Error(needSample());
       testResult = await api("POST", "/api/templates/test", { doc_id: docId, template: tpl, template_id: id });
@@ -1308,34 +1317,101 @@ async function viewSettings() {
   const inp = (key, type = "text") => el("input", { type, value: s[key], oninput: (e) => (s[key] = type === "number" ? Number(e.target.value) : e.target.value) });
   const ok = (b) => el("span", { class: `badge ${b ? "done" : "error"}` }, b ? T("Key 已配置", "Key configured") : T("未配置 Key", "Key not configured"));
 
-  // A model name box plus a picker filled from the provider's live model list ("Fetch models" button).
-  const pickers = { claude: [], deepseek: [] };
+  // Each vendor has a "Models" dialog where the administrator fetches the vendor's models and switches on the ones
+  // that may be used. Only switched-on models (plus the one currently saved) appear in the model drop-downs.
+  s.model_catalog ||= {};
+  s.enabled_models ||= {};
+  const modelSelects = [];
+  const newestFirst = (list) => [...list].sort((a, b) => (b.created || 0) - (a.created || 0) || b.id.localeCompare(a.id));
+  const modelLabel = (m) => (m.name && m.name !== m.id ? `${m.id}（${m.name}）` : m.id);
+  const enabledModels = (provider) => {
+    const on = new Set(s.enabled_models[provider] || []);
+    const known = s.model_catalog[provider] || [];
+    const listed = newestFirst(known).filter((m) => on.has(m.id));
+    const extra = [...on].filter((id) => !known.some((m) => m.id === id)).map((id) => ({ id, name: id }));
+    return [...listed, ...extra];
+  };
   const modelInput = (key, provider) => {
-    const input = inp(key);
-    const picker = el("select", { style: "display:none;margin-top:4px", onchange: (e) => {
-      if (e.target.value) { s[key] = e.target.value; input.value = e.target.value; }
-    } });
-    pickers[provider].push({ key, picker });
-    return el("div", {}, input, picker);
+    const select = el("select", { onchange: (e) => { s[key] = e.target.value; } });
+    const refresh = () => {
+      const models = enabledModels(provider);
+      if (s[key] && !models.some((m) => m.id === s[key])) models.unshift({ id: s[key], name: s[key] });
+      select.replaceChildren(...models.map((m) => opt(m.id, modelLabel(m), s[key])));
+    };
+    refresh();
+    modelSelects.push({ provider, refresh });
+    return select;
   };
-  const fillPickers = (provider, models) => {
-    for (const { key, picker } of pickers[provider]) {
-      picker.replaceChildren(opt("", T("— 从可用模型中选择 —", "— choose from available models —"), ""),
-        ...models.map((m) => opt(m.id, m.name && m.name !== m.id ? `${m.id}（${m.name}）` : m.id, s[key])));
-      picker.style.display = "";
+  const EYE = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>';
+  const EYE_OFF = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17.9 17.9A10.6 10.6 0 0 1 12 19C5.6 19 2 12 2 12a18 18 0 0 1 4.1-5M9.9 5.2A9.9 9.9 0 0 1 12 5c6.4 0 10 7 10 7a18 18 0 0 1-2.2 3.2M1 1l22 22M14.1 14.1a3 3 0 0 1-4.2-4.2"/></svg>';
+  const openModels = (provider, vendor) => {
+    let list = newestFirst((s.model_catalog[provider] || []));
+    const on = new Set(s.enabled_models[provider] || []);
+    for (const id of on) if (!list.some((m) => m.id === id)) list.push({ id, name: id, created: 0 });
+    let filter = "";
+    const dlg = el("dialog", { class: "models-dialog" });
+    const rowsBox = el("div", { class: "models-list" });
+    const count = el("span", { class: "muted" });
+    const status = el("span", { class: "small muted" });
+    const visible = () => {
+      const q = filter.trim().toLowerCase();
+      return list.filter((m) => !q || m.id.toLowerCase().includes(q) || (m.name || "").toLowerCase().includes(q));
+    };
+    function renderRows() {
+      count.textContent = `(${list.length})`;
+      const rows = visible();
+      rowsBox.replaceChildren(...[...rows.map((m) => {
+        const shown = on.has(m.id);
+        const eye = el("button", { type: "button", class: `eye${shown ? " on" : ""}`, title: pick(shown ? "可用,点击隐藏" : "不可用,点击启用", shown ? "Available - click to hide" : "Unavailable - click to enable"),
+          onclick: () => { if (shown) on.delete(m.id); else on.add(m.id); renderRows(); } });
+        eye.innerHTML = shown ? EYE : EYE_OFF;
+        return el("div", { class: `model-row${shown ? "" : " off"}` },
+          el("div", { class: "model-name" }, el("strong", {}, m.name || m.id), m.name && m.name !== m.id ? el("span", { class: "small muted" }, m.id) : null),
+          eye);
+      }), rows.length ? null : el("p", { class: "muted" }, list.length ? T("没有匹配的模型。", "No models match.") : T("还没有模型。点击“获取可用模型”从厂商读取。", "No models yet. Use Fetch available models to read them from the vendor."))].filter(Boolean));
     }
-  };
-  const fetchModels = (provider) => {
-    const status = el("span", { class: "small muted", style: "margin-left:8px" });
-    const btn = el("button", { type: "button", onclick: () => guarded(btn, async () => {
+    const fetchBtn = el("button", { type: "button", onclick: () => guarded(fetchBtn, async () => {
       status.textContent = "";
       try {
         const { models } = await api("GET", `/api/models/${provider}`);
-        fillPickers(provider, models);
-        status.textContent = pick(`获取到 ${models.length} 个可用模型`, `${models.length} models available`);
-      } catch (e) { status.textContent = ""; toast(e.message, true); }
+        const seen = new Set(models.map((m) => m.id));
+        list = newestFirst([...models, ...list.filter((m) => !seen.has(m.id) && on.has(m.id))]);
+        status.textContent = pick(`获取到 ${models.length} 个模型`, `${models.length} models fetched`);
+        renderRows();
+      } catch (e) { toast(e.message, true); }
     }) }, T("获取可用模型", "Fetch available models"));
-    return el("span", {}, btn, status);
+    const setVisible = (value) => () => { for (const m of visible()) { if (value) on.add(m.id); else on.delete(m.id); } renderRows(); };
+    const doneBtn = el("button", { class: "primary", type: "button", onclick: () => guarded(doneBtn, async () => {
+      s.model_catalog[provider] = list.map(({ id, name, created }) => ({ id, name, created: created || 0 }));
+      s.enabled_models[provider] = list.filter((m) => on.has(m.id)).map((m) => m.id);
+      await api("PUT", "/api/settings", { model_catalog: s.model_catalog, enabled_models: s.enabled_models });
+      for (const m of modelSelects) if (m.provider === provider) m.refresh();
+      refreshCounts();
+      toast(pick("已保存可用模型", "Available models saved"));
+      dlg.close();
+    }) }, T("完成", "Done"));
+    dlg.addEventListener("close", () => dlg.remove());
+    dlg.append(el("div", { class: "models-head" },
+      el("h3", { style: "margin:0" }, vendor, " ", T("可用模型", "Available models"), " ", count),
+      el("span", { class: "spacer" }), fetchBtn, status),
+      el("div", { class: "models-tools" },
+        el("input", { type: "text", placeholder: pick("筛选模型…", "Filter models…"), oninput: (e) => { filter = e.target.value; renderRows(); } }),
+        el("button", { type: "button", onclick: setVisible(false) }, T("全部隐藏", "Hide all")),
+        el("button", { type: "button", onclick: setVisible(true) }, T("全部显示", "Show all"))),
+      rowsBox,
+      el("div", { class: "models-foot" }, el("button", { type: "button", onclick: () => dlg.close() }, T("取消", "Cancel")), doneBtn));
+    document.body.append(dlg);
+    renderRows();
+    dlg.showModal();
+  };
+  const countLabels = [];
+  const refreshCounts = () => countLabels.forEach((f) => f());
+  const fetchModels = (provider, vendor) => {
+    const summary = el("span", { class: "small muted", style: "margin-left:8px" });
+    const update = () => { const n = (s.enabled_models[provider] || []).length; summary.textContent = pick(`已启用 ${n} 个模型`, `${n} models enabled`); };
+    countLabels.push(update);
+    update();
+    return el("span", {}, el("button", { type: "button", onclick: () => openModels(provider, vendor) }, T("模型", "Models")), summary);
   };
   const saveBtn = el("button", { class: "primary", onclick: () => guarded(saveBtn, async () => {
     await api("PUT", "/api/settings", s); toast(pick("设置已保存", "Settings saved"));
@@ -1381,11 +1457,11 @@ async function viewSettings() {
       "Our own company names (one per line; excluded when batch templating works out vendors and keywords)"),
       el("textarea", { rows: 3, value: s.own_companies || "", oninput: (e) => (s.own_companies = e.target.value),
         placeholder: pick("如：Apex Logistics International Inc", "e.g. Apex Logistics International Inc") })),
-    el("h3", {}, "Claude ", ok(providers.claude), " ", providers.claude ? fetchModels("claude") : null),
+    el("h3", {}, "Claude ", ok(providers.claude), " ", providers.claude ? fetchModels("claude", "Claude") : null),
     el("div", { class: "grid2" },
       el("label", { class: "field" }, T("抽取型号", "Extraction model"), modelInput("claude_model", "claude")),
       el("label", { class: "field" }, T("快速型号（识别模板、筛选页面）", "Fast model (template detection, page filtering)"), modelInput("claude_fast_model", "claude"))),
-    el("h3", {}, "DeepSeek ", ok(providers.deepseek), " ", providers.deepseek ? fetchModels("deepseek") : null),
+    el("h3", {}, "DeepSeek ", ok(providers.deepseek), " ", providers.deepseek ? fetchModels("deepseek", "DeepSeek") : null),
     el("label", { class: "field" }, T("型号（只能处理有文字层的电子版 PDF）", "Model (digital PDFs with a text layer only)"), modelInput("deepseek_model", "deepseek")),
     el("h3", {}, T("自定义 OpenAI 兼容接口（如 Ollama）", "Custom OpenAI-compatible endpoint (e.g. Ollama)")),
     el("div", { class: "grid3" },

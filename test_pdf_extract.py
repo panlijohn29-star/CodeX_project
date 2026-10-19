@@ -101,6 +101,28 @@ class PdfExtractIntegrationTests(unittest.TestCase):
         with failing:
             self.assertEqual(admin.get("/tools/pdf-extract/api/models/deepseek").status_code, 502)
 
+    def test_only_enabled_models_are_offered_and_the_choice_is_validated(self):
+        admin = self.login("admin", "admin-pass")
+        granted = self.login("granted", "granted-pass")
+        url = "/tools/pdf-extract/api/settings"
+        catalog = {"claude": [
+            {"id": "claude-old", "name": "Claude Old", "created": 100},
+            {"id": "claude-new", "name": "Claude New", "created": 300},
+            {"id": "claude-mid", "name": "Claude Mid", "created": 200}]}
+        saved = admin.put(url, json={"model_catalog": catalog, "enabled_models": {"claude": ["claude-old", "claude-new", "gone"]}})
+        self.assertEqual(saved.status_code, 200)
+
+        # Catalog order is kept (newest first), unlisted-but-enabled ids follow, switched-off models are absent.
+        expected = {"claude": [{"id": "claude-old", "name": "Claude Old"}, {"id": "claude-new", "name": "Claude New"},
+                               {"id": "gone", "name": "gone"}], "deepseek": []}
+        self.assertEqual(admin.get(url).get_json()["model_options"], expected)
+        self.assertEqual(granted.get(url).get_json()["model_options"], expected)
+
+        for bad in ({"enabled_models": {"openai": ["x"]}}, {"enabled_models": {"claude": "x"}},
+                    {"enabled_models": {"claude": [1]}}, {"model_catalog": {"claude": [{"name": "no id"}]}},
+                    {"model_catalog": []}):
+            self.assertEqual(admin.put(url, json=bad).status_code, 400, bad)
+        self.assertEqual(granted.put(url, json={"enabled_models": {"claude": ["x"]}}).status_code, 403)
     def test_admin_page_assets_and_api_under_prefix(self):
         admin = self.login("admin", "admin-pass")
         self.assertEqual(admin.get("/features/pdf_extract").status_code, 200)
