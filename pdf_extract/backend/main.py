@@ -51,14 +51,38 @@ def _404(row, what=bi("记录", "Record")):
 
 # ------------------------------------------------------------------ settings
 
+def _is_admin(request: Request) -> bool:
+    # Set by the platform proxy from the logged-in user; it overwrites any client-supplied value.
+    return request.headers.get("x-platform-admin") != "0"
+
+
 @app.get("/api/settings")
-def get_settings():
-    return {"settings": db.get_settings(), "providers": llm.provider_status(), "field_types": extractor.FIELD_TYPES,
+def get_settings(request: Request):
+    full = db.get_settings()
+    # Other pages still need the field types, model presets and default model name; the rest is admin-only.
+    if not _is_admin(request):
+        return {"settings": {"claude_model": full.get("claude_model", "")}, "providers": {},
+                "field_types": extractor.FIELD_TYPES, "model_presets": extractor.model_presets()}
+    return {"settings": full, "providers": llm.provider_status(), "field_types": extractor.FIELD_TYPES,
             "model_presets": extractor.model_presets()}
 
 
+@app.get("/api/models/{provider}")
+def list_provider_models(provider: str, request: Request):
+    if not _is_admin(request):
+        raise HTTPException(403, bi("只有管理员可以获取模型列表", "Only administrators can fetch the model list"))
+    if provider not in ("claude", "deepseek"):
+        raise HTTPException(404, bi("不支持的服务商", "Unsupported provider"))
+    try:
+        return {"models": llm.list_models(provider)}
+    except llm.LLMError as e:
+        raise HTTPException(502, e.msg)
+
+
 @app.put("/api/settings")
-def put_settings(body: dict):
+def put_settings(body: dict, request: Request):
+    if not _is_admin(request):
+        raise HTTPException(403, bi("只有管理员可以修改设置", "Only administrators can change settings"))
     return {"settings": db.save_settings(body)}
 
 
@@ -632,5 +656,7 @@ def index(request: Request):
     base = request.scope.get("root_path", "").rstrip("/")
     page = (config.FRONTEND_DIR / "index.html").read_text(encoding="utf-8")
     page = page.replace('"/static/', f'"{base}/static/')
-    page = page.replace("</head>", f"<script>window.__PDF_EXTRACT_BASE={json.dumps(base)};</script></head>", 1)
+    admin = json.dumps(_is_admin(request))
+    page = page.replace("</head>", f"<script>window.__PDF_EXTRACT_BASE={json.dumps(base)};"
+                                   f"window.__PDF_EXTRACT_ADMIN={admin};</script></head>", 1)
     return HTMLResponse(page, headers={"Cache-Control": "no-store"})

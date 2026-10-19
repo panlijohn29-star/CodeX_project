@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 
 if os.name == "nt":
     import msvcrt
@@ -770,12 +771,17 @@ def is_admin_user():
     return session.get("user_id") == ADMIN_USER_ID
 
 
-def can_view_truck_rate_log():
+def is_admin_account():
+    """The built-in admin account, or an enabled user holding the admin role."""
     user_id = session.get("user_id", "")
     if user_id == ADMIN_USER_ID:
         return True
     user = get_auth_user(user_id)
     return bool(user and user["enabled"] and user.get("role_id") == ADMIN_ROLE_ID)
+
+
+def can_view_truck_rate_log():
+    return is_admin_account()
 
 
 def has_feature_access(feature_id, user_id=None):
@@ -1159,6 +1165,8 @@ def pdf_extract_proxy(subpath):
     environ = request.environ.copy()
     environ["SCRIPT_NAME"] = PDF_EXTRACT_PREFIX
     environ["PATH_INFO"] = "/" + subpath
+    # Always overwritten here, so a client-supplied X-Platform-Admin header is never trusted.
+    environ["HTTP_X_PLATFORM_ADMIN"] = "1" if is_admin_account() else "0"
     return Response.from_app(get_wsgi_app(), environ)
 
 
@@ -2147,5 +2155,16 @@ def download_eason_dfw_billing(filename):
     return send_file(output_path, as_attachment=True, download_name=filename)
 
 
+def warm_up_pdf_extract():
+    """Load the PDF Extract backend (about 3 s of SDK imports) so the first user does not wait for it."""
+    try:
+        from pdf_extract.wsgi import get_wsgi_app
+
+        get_wsgi_app()
+    except Exception:
+        app.logger.exception("PDF Extract warm-up failed; it will load on first use")
+
+
 if __name__ == "__main__":
+    threading.Thread(target=warm_up_pdf_extract, name="pdf-extract-warmup", daemon=True).start()
     app.run(host="0.0.0.0", port=5001, debug=False)

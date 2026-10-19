@@ -3,6 +3,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 
 class RbacPlatformTests(unittest.TestCase):
@@ -18,16 +19,19 @@ class RbacPlatformTests(unittest.TestCase):
             ]}, handle)
         with open(cls.role_path, "w", encoding="utf-8") as handle:
             json.dump({"schema_version": 1, "roles": []}, handle)
-        os.environ["AUTH_CONFIG_PATH"] = cls.auth_path
-        os.environ["ROLE_CONFIG_PATH"] = cls.role_path
-        os.environ["FLASK_SECRET_KEY"] = "test-secret"
-        os.environ["SESSION_COOKIE_SECURE"] = "true"
+        cls.env_patch = mock.patch.dict(os.environ, {
+            "AUTH_CONFIG_PATH": cls.auth_path, "ROLE_CONFIG_PATH": cls.role_path,
+            "FLASK_SECRET_KEY": "test-secret", "SESSION_COOKIE_SECURE": "true",
+        })
+        cls.env_patch.start()
         import app_v4
         cls.platform = importlib.reload(app_v4)
         cls.platform.app.config["TESTING"] = True
 
     @classmethod
     def tearDownClass(cls):
+        cls.env_patch.stop()
+        importlib.reload(cls.platform)
         cls.temp_dir.cleanup()
 
     def login(self, client, user_id, password):
