@@ -41,7 +41,8 @@ class PdfExtractIntegrationTests(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.env_patch.stop()
-        importlib.reload(cls.platform)
+        with mock.patch.dict(os.environ, {"FLASK_SECRET_KEY": os.environ.get("FLASK_SECRET_KEY", "test-secret")}):
+            importlib.reload(cls.platform)
         cls.temp_dir.cleanup()
 
     def login(self, user_id, password):

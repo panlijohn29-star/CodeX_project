@@ -45,7 +45,8 @@ class MaintenanceNoticeTests(unittest.TestCase):
         cls.path_patch.stop()
         cls.env_patch.stop()
         # Reload with the original environment so later test modules do not inherit the deleted temp paths.
-        importlib.reload(cls.platform)
+        with mock.patch.dict(os.environ, {"FLASK_SECRET_KEY": os.environ.get("FLASK_SECRET_KEY", "test-secret")}):
+            importlib.reload(cls.platform)
         cls.temp_dir.cleanup()
 
     def setUp(self):
