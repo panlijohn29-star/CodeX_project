@@ -123,6 +123,13 @@ class PdfExtractIntegrationTests(unittest.TestCase):
                     {"model_catalog": []}):
             self.assertEqual(admin.put(url, json=bad).status_code, 400, bad)
         self.assertEqual(granted.put(url, json={"enabled_models": {"claude": ["x"]}}).status_code, 403)
+    def test_own_company_names_ship_with_the_code(self):
+        from pdf_extract.backend import config
+
+        names = config.DEFAULT_SETTINGS["own_companies"].splitlines()
+        self.assertGreater(len(names), 40)
+        self.assertIn("APEX LOGISTICS INTERNATIONAL (CN) LIMITED", names)
+        self.assertEqual(len(names), len(set(names)))
     def test_admin_page_assets_and_api_under_prefix(self):
         admin = self.login("admin", "admin-pass")
         self.assertEqual(admin.get("/features/pdf_extract").status_code, 200)
