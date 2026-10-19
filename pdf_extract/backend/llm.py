@@ -115,6 +115,28 @@ def provider_status() -> dict:
     }
 
 
+def list_models(provider: str) -> list[dict]:
+    """Models the provider's API currently offers for the configured key: [{"id", "name"}], newest first for Claude."""
+    try:
+        if provider == "claude":
+            if not config.ANTHROPIC_API_KEY:
+                raise LLMError(bi("未配置 Claude API Key", "Claude API key is not configured"))
+            client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY, max_retries=1, timeout=30)
+            return [{"id": m.id, "name": getattr(m, "display_name", "") or m.id} for m in client.models.list(limit=100)]
+        if provider == "deepseek":
+            if not config.DEEPSEEK_API_KEY:
+                raise LLMError(bi("未配置 DeepSeek API Key", "DeepSeek API key is not configured"))
+            client = openai.OpenAI(api_key=config.DEEPSEEK_API_KEY, base_url=config.DEEPSEEK_BASE_URL,
+                                   max_retries=1, timeout=30)
+            return sorted(({"id": m.id, "name": m.id} for m in client.models.list()), key=lambda m: m["id"])
+    except LLMError:
+        raise
+    except Exception as e:  # noqa: BLE001 - surface the provider's own message to the settings page
+        log.warning("listing %s models failed: %s", provider, e)
+        raise LLMError(bi(f"获取模型列表失败：{e}", f"Could not fetch the model list: {e}")) from e
+    raise LLMError(bi("不支持的服务商", "Unsupported provider"))
+
+
 def call_structured(
     provider: str,
     model: str,

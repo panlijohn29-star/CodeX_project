@@ -105,6 +105,8 @@ function errorText(j, fallback) {
 }
 
 const BASE = window.__PDF_EXTRACT_BASE || "";
+const IS_ADMIN = window.__PDF_EXTRACT_ADMIN !== false;  // Settings is admin-only; the server enforces it too
+if (!IS_ADMIN) document.querySelector('[data-nav="settings"]')?.remove();
 
 async function api(method, url, body) {
   const init = { method, headers: {} };
@@ -236,7 +238,7 @@ function route() {
     template: () => viewTemplate(id === "new" ? null : Number(id), params),
     formats: () => viewFormats(),
     format: () => viewFormat(id === "new" ? null : Number(id)),
-    settings: () => viewSettings(),
+    settings: () => (IS_ADMIN ? viewSettings() : viewDocs()),
     usage: () => viewUsage(),
   };
   (views[section] || views.docs)().catch((e) => {
@@ -436,8 +438,8 @@ function renderAutoPanel(box) {
       el("div", { class: "row", style: "margin-top:10px" },
         el("label", {}, el("input", { type: "checkbox", checked: S.autoModel, onchange: (e) => (S.autoModel = e.target.checked) }),
           T(" 为每家自动选择模型（更准，每家多花几分钱）", " Pick the model for each vendor automatically (more accurate, a few cents more each)"))),
-      el("div", { class: "small muted", style: "margin-top:6px" }, T("在", "Fill in "), el("a", { href: "#/settings" }, T("设置", "Settings")),
-        T("里填写“我方公司名称”，识别供应商时会排除它们（否则付款方可能被当成供应商）。", " your own company names; they are excluded when working out vendors (otherwise the payer may be taken for a vendor).")),
+      IS_ADMIN ? el("div", { class: "small muted", style: "margin-top:6px" }, T("在", "Fill in "), el("a", { href: "#/settings" }, T("设置", "Settings")),
+        T("里填写“我方公司名称”，识别供应商时会排除它们（否则付款方可能被当成供应商）。", " your own company names; they are excluded when working out vendors (otherwise the payer may be taken for a vendor).")) : null,
       el("div", { class: "row", style: "margin-top:12px" },
         (() => { const b = el("button", { class: "primary", onclick: () => guarded(b, autoAnalyze) }, T("分析供应商", "Analyse vendors")); return b; })(),
         el("button", { onclick: close }, T("取消", "Cancel"))));
@@ -1281,7 +1283,7 @@ async function viewUsage() {
     r.total.unpriced ? el("div", { class: "panel", style: "background:#fffbeb;border-color:#fcd34d" },
       L(() => pick(`有 ${r.total.unpriced} 次调用的型号没有单价，成本没有计入。请到`,
         `${r.total.unpriced} calls use a model without a price, so their cost is not included. Add model prices in `)),
-      el("a", { href: "#/settings" }, T("设置", "Settings")), T("里补充模型单价。", ".")) : null,
+      IS_ADMIN ? el("a", { href: "#/settings" }, T("设置", "Settings")) : T("设置", "Settings"), T("里补充模型单价。", ".")) : null,
     el("div", { class: "stats" },
       stat(T("估算总成本", "Est. total cost"), L(() => costText(r.total)), L(() => pick(`${r.total.calls} 次调用`, `${r.total.calls} calls`))),
       stat(T("总 Token", "Total tokens"), fmtTok(r.total.tokens), L(() => {
@@ -1305,6 +1307,36 @@ async function viewSettings() {
   const { settings: s, providers, model_presets: presets } = await api("GET", "/api/settings");
   const inp = (key, type = "text") => el("input", { type, value: s[key], oninput: (e) => (s[key] = type === "number" ? Number(e.target.value) : e.target.value) });
   const ok = (b) => el("span", { class: `badge ${b ? "done" : "error"}` }, b ? T("Key 已配置", "Key configured") : T("未配置 Key", "Key not configured"));
+
+  // A model name box plus a picker filled from the provider's live model list ("Fetch models" button).
+  const pickers = { claude: [], deepseek: [] };
+  const modelInput = (key, provider) => {
+    const input = inp(key);
+    const picker = el("select", { style: "display:none;margin-top:4px", onchange: (e) => {
+      if (e.target.value) { s[key] = e.target.value; input.value = e.target.value; }
+    } });
+    pickers[provider].push({ key, picker });
+    return el("div", {}, input, picker);
+  };
+  const fillPickers = (provider, models) => {
+    for (const { key, picker } of pickers[provider]) {
+      picker.replaceChildren(opt("", T("— 从可用模型中选择 —", "— choose from available models —"), ""),
+        models.map((m) => opt(m.id, m.name && m.name !== m.id ? `${m.id}（${m.name}）` : m.id, s[key])));
+      picker.style.display = "";
+    }
+  };
+  const fetchModels = (provider) => {
+    const status = el("span", { class: "small muted", style: "margin-left:8px" });
+    const btn = el("button", { type: "button", onclick: () => guarded(btn, async () => {
+      status.textContent = "";
+      try {
+        const { models } = await api("GET", `/api/models/${provider}`);
+        fillPickers(provider, models);
+        status.textContent = pick(`获取到 ${models.length} 个可用模型`, `${models.length} models available`);
+      } catch (e) { status.textContent = ""; toast(e.message, true); }
+    }) }, T("获取可用模型", "Fetch available models"));
+    return el("span", {}, btn, status);
+  };
   const saveBtn = el("button", { class: "primary", onclick: () => guarded(saveBtn, async () => {
     await api("PUT", "/api/settings", s); toast(pick("设置已保存", "Settings saved"));
   }) }, T("保存设置", "Save settings"));
@@ -1349,12 +1381,12 @@ async function viewSettings() {
       "Our own company names (one per line; excluded when batch templating works out vendors and keywords)"),
       el("textarea", { rows: 3, value: s.own_companies || "", oninput: (e) => (s.own_companies = e.target.value),
         placeholder: pick("如：Apex Logistics International Inc", "e.g. Apex Logistics International Inc") })),
-    el("h3", {}, "Claude ", ok(providers.claude)),
+    el("h3", {}, "Claude ", ok(providers.claude), " ", providers.claude ? fetchModels("claude") : null),
     el("div", { class: "grid2" },
-      el("label", { class: "field" }, T("抽取型号", "Extraction model"), inp("claude_model")),
-      el("label", { class: "field" }, T("快速型号（识别模板、筛选页面）", "Fast model (template detection, page filtering)"), inp("claude_fast_model"))),
-    el("h3", {}, "DeepSeek ", ok(providers.deepseek)),
-    el("label", { class: "field" }, T("型号（只能处理有文字层的电子版 PDF）", "Model (digital PDFs with a text layer only)"), inp("deepseek_model")),
+      el("label", { class: "field" }, T("抽取型号", "Extraction model"), modelInput("claude_model", "claude")),
+      el("label", { class: "field" }, T("快速型号（识别模板、筛选页面）", "Fast model (template detection, page filtering)"), modelInput("claude_fast_model", "claude"))),
+    el("h3", {}, "DeepSeek ", ok(providers.deepseek), " ", providers.deepseek ? fetchModels("deepseek") : null),
+    el("label", { class: "field" }, T("型号（只能处理有文字层的电子版 PDF）", "Model (digital PDFs with a text layer only)"), modelInput("deepseek_model", "deepseek")),
     el("h3", {}, T("自定义 OpenAI 兼容接口（如 Ollama）", "Custom OpenAI-compatible endpoint (e.g. Ollama)")),
     el("div", { class: "grid3" },
       el("label", { class: "field" }, "Base URL", inp("custom_base_url")),
