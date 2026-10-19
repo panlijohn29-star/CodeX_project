@@ -1321,7 +1321,7 @@ async function viewSettings() {
   const fillPickers = (provider, models) => {
     for (const { key, picker } of pickers[provider]) {
       picker.replaceChildren(opt("", T("— 从可用模型中选择 —", "— choose from available models —"), ""),
-        models.map((m) => opt(m.id, m.name && m.name !== m.id ? `${m.id}（${m.name}）` : m.id, s[key])));
+        ...models.map((m) => opt(m.id, m.name && m.name !== m.id ? `${m.id}（${m.name}）` : m.id, s[key])));
       picker.style.display = "";
     }
   };
