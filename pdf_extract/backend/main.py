@@ -56,15 +56,27 @@ def _is_admin(request: Request) -> bool:
     return request.headers.get("x-platform-admin") != "0"
 
 
+def _model_options(settings: dict) -> dict:
+    """The models an administrator switched on per vendor, newest first, for every model drop-down."""
+    options = {}
+    for provider in ("claude", "deepseek"):
+        enabled = [i for i in (settings.get("enabled_models") or {}).get(provider, []) if isinstance(i, str)]
+        known = {m["id"]: m for m in (settings.get("model_catalog") or {}).get(provider, []) if isinstance(m, dict)}
+        ordered = [i for i in known if i in enabled] + [i for i in enabled if i not in known]
+        options[provider] = [{"id": i, "name": known.get(i, {}).get("name") or i} for i in dict.fromkeys(ordered)]
+    return options
+
+
 @app.get("/api/settings")
 def get_settings(request: Request):
     full = db.get_settings()
     # Other pages still need the field types, model presets and default model name; the rest is admin-only.
     if not _is_admin(request):
         return {"settings": {"claude_model": full.get("claude_model", "")}, "providers": {},
-                "field_types": extractor.FIELD_TYPES, "model_presets": extractor.model_presets()}
+                "field_types": extractor.FIELD_TYPES, "model_presets": extractor.model_presets(),
+                "model_options": _model_options(full)}
     return {"settings": full, "providers": llm.provider_status(), "field_types": extractor.FIELD_TYPES,
-            "model_presets": extractor.model_presets()}
+            "model_presets": extractor.model_presets(), "model_options": _model_options(full)}
 
 
 @app.get("/api/models/{provider}")
@@ -79,10 +91,27 @@ def list_provider_models(provider: str, request: Request):
         raise HTTPException(502, e.msg)
 
 
+def _valid_id_lists(value) -> bool:
+    return isinstance(value, dict) and all(
+        k in ("claude", "deepseek") and isinstance(v, list) and all(isinstance(i, str) and i for i in v)
+        for k, v in value.items())
+
+
+def _valid_catalog(value) -> bool:
+    return isinstance(value, dict) and all(
+        k in ("claude", "deepseek") and isinstance(v, list)
+        and all(isinstance(m, dict) and isinstance(m.get("id"), str) and m["id"] for m in v)
+        for k, v in value.items())
+
+
 @app.put("/api/settings")
 def put_settings(body: dict, request: Request):
     if not _is_admin(request):
         raise HTTPException(403, bi("只有管理员可以修改设置", "Only administrators can change settings"))
+    if "enabled_models" in body and not _valid_id_lists(body["enabled_models"]):
+        raise HTTPException(400, bi("可用模型列表无效", "The list of enabled models is invalid"))
+    if "model_catalog" in body and not _valid_catalog(body["model_catalog"]):
+        raise HTTPException(400, bi("模型目录无效", "The model catalog is invalid"))
     return {"settings": db.save_settings(body)}
 
 
