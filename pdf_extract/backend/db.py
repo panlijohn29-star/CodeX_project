@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS templates (
     provider TEXT NOT NULL DEFAULT 'default',
     model TEXT NOT NULL DEFAULT '',
     instructions TEXT NOT NULL DEFAULT '',
+    suggest_hint TEXT NOT NULL DEFAULT '',
     send_images INTEGER NOT NULL DEFAULT 0,
     model_note TEXT NOT NULL DEFAULT '',
     header_fields TEXT NOT NULL DEFAULT '[]',
@@ -53,6 +54,8 @@ CREATE TABLE IF NOT EXISTS documents (
     template_stamp TEXT,
     timings TEXT,
     source TEXT NOT NULL DEFAULT '',
+    corrections TEXT NOT NULL DEFAULT '[]',
+    confirmed_flags TEXT NOT NULL DEFAULT '[]',
     created_at TEXT,
     updated_at TEXT
 );
@@ -98,7 +101,7 @@ CREATE TABLE IF NOT EXISTS settings (
 
 JSON_COLUMNS = {
     "templates": ["keywords", "header_fields", "item_fields", "checks"],
-    "documents": ["pages", "data", "original_data", "uncertain", "issues", "timings"],
+    "documents": ["pages", "data", "original_data", "uncertain", "issues", "timings", "corrections", "confirmed_flags"],
     "output_formats": ["columns", "mappings", "allocate"],
 }
 
@@ -119,7 +122,8 @@ def init_db() -> None:
         conn.executescript(SCHEMA)
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(documents)")}
         for col, ddl in (("batch_id", "INTEGER"), ("exported_at", "TEXT"), ("file_hash", "TEXT"),
-                         ("template_stamp", "TEXT"), ("timings", "TEXT"), ("source", "TEXT NOT NULL DEFAULT ''")):
+                         ("template_stamp", "TEXT"), ("timings", "TEXT"), ("source", "TEXT NOT NULL DEFAULT ''"),
+                         ("corrections", "TEXT NOT NULL DEFAULT '[]'"), ("confirmed_flags", "TEXT NOT NULL DEFAULT '[]'")):
             if col not in cols:
                 conn.execute(f"ALTER TABLE documents ADD COLUMN {col} {ddl}")
         ucols = {r["name"] for r in conn.execute("PRAGMA table_info(llm_usage)")}
@@ -128,7 +132,7 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_hash ON documents(file_hash)")
         tcols = {r["name"] for r in conn.execute("PRAGMA table_info(templates)")}
         for col, ddl in (("send_images", "INTEGER NOT NULL DEFAULT 0"), ("model_note", "TEXT NOT NULL DEFAULT ''"),
-                         ("auto_generated", "INTEGER NOT NULL DEFAULT 0")):
+                         ("auto_generated", "INTEGER NOT NULL DEFAULT 0"), ("suggest_hint", "TEXT NOT NULL DEFAULT ''")):
             if col not in tcols:
                 conn.execute(f"ALTER TABLE templates ADD COLUMN {col} {ddl}")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_batch ON documents(batch_id)")

@@ -140,6 +140,25 @@ async function guarded(btn, fn) {
   finally { btn.disabled = false; btn.replaceChildren(...kids); }
 }
 
+async function withOverlay(zh, en, fn) {
+  const overlay = el("div", { class: "busy-overlay" }, el("div", { class: "big-spin" }), el("div", {}, T(zh, en)));
+  document.body.append(overlay);
+  try { return await fn(); } finally { overlay.remove(); }
+}
+
+function fmtDuration(ms) {
+  const total = Math.round(ms / 1000);
+  const m = Math.floor(total / 60), s = total % 60;
+  if (!m) return total ? pick(`${s}秒`, `${s}s`) : pick("<1秒", "<1s");
+  return pick(`${m}分${s}秒`, `${m}m ${s}s`);
+}
+
+function scoreBadge(c) {
+  if (!c) return el("span", { class: "muted" }, "—");
+  return el("span", { class: `badge score ${c.level}`,
+    title: L(() => c.reasons.map((r) => "• " + loc(r)).join("\n") || pick("没有发现问题", "No problems found")) }, String(c.score));
+}
+
 function fmtVal(v) { return v === null || v === undefined ? "" : String(v); }
 
 function fmtTok(n) {
@@ -220,6 +239,139 @@ function download(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 }
 
+function resultCsv(headerFields, itemFields, data, name) {
+  const cols = [...headerFields, ...itemFields];
+  const q = (v) => { const s = v == null ? "" : String(v); return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  const rows = data.items.length ? data.items : [{}];
+  const lines = [cols.map((f) => q(f.label)).join(",")];
+  for (const row of rows) lines.push(cols.map((f) => q(headerFields.includes(f) ? (data.header || {})[f.key] : row[f.key])).join(","));
+  const stamp = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16).replace("T", "_").replace(":", "");
+  download(new Blob(["\ufeff" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" }), `${name || "extraction"}_${stamp}.csv`);
+}
+
+// Chips for typing field names: Enter adds, click renames, × removes.
+function fieldChips(list) {
+  const tags = el("div", { class: "tag-list" });
+  const input = el("input", { type: "text", class: "tag-input", placeholder: T("输入字段名，回车添加", "Type a field name and press Enter") });
+  const slug = (label) => {
+    const base = label.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "field";
+    let k = base, n = 2;
+    while (list.some((f) => f.key === k)) k = `${base}_${n++}`;
+    return k;
+  };
+  const draw = () => tags.replaceChildren(...list.map((f, i) => {
+    const chip = el("span", { class: "tag" });
+    const show = () => chip.replaceChildren(
+      el("span", { class: "tag-name", title: T("点击改名", "Click to rename"), onclick: edit }, f.label),
+      el("button", { class: "tag-x", onclick: () => { list.splice(i, 1); draw(); } }, "×"));
+    const edit = () => {
+      const inp = el("input", { type: "text", class: "tag-edit", value: f.label, size: Math.max(6, f.label.length + 1) });
+      const done = (keep) => { const v = inp.value.trim(); if (keep && v) f.label = v; show(); };
+      inp.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); done(true); } if (e.key === "Escape") done(false); };
+      inp.onblur = () => done(true);
+      chip.replaceChildren(inp); inp.focus(); inp.select();
+    };
+    show();
+    return chip;
+  }));
+  const add = () => {
+    const label = input.value.trim();
+    if (!label) return;
+    list.push({ key: slug(label), label });
+    input.value = ""; draw(); input.focus();
+  };
+  input.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); add(); } };
+  draw();
+  return el("div", {}, tags, el("div", { class: "row", style: "margin-top:8px" }, input, el("button", { onclick: add }, T("+ 添加", "+ Add"))));
+}
+
+const quickState = { file: null, withHeader: true, withItems: true, header: [], items: [], instructions: "", result: null, modelKey: "default" };
+
+async function viewQuick() {
+  const s = quickState;
+  const cfg = await api("GET", "/api/settings");
+  const presets = cfg.model_presets || [];
+  const draw = () => {
+    const fileLabel = el("span", { class: "small muted" }, s.file ? s.file.name : T("尚未选择文件", "No file chosen"));
+    const picker = el("input", { type: "file", accept: ".pdf,.jpg,.jpeg,.png,.webp,.bmp,.gif,.tif,.tiff,.eml,.msg,.xlsx,.xlsm,.csv", style: "display:none",
+      onchange: (e) => { s.file = e.target.files[0] || null; s.result = null; draw(); } });
+    const drop = el("div", { class: "dropzone", onclick: () => picker.click() },
+      el("b", {}, T("点击或拖入文件", "Click or drop a file")), el("div", { class: "small" }, fileLabel));
+    drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+    drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+    drop.addEventListener("drop", (e) => { e.preventDefault(); s.file = e.dataTransfer.files[0] || null; s.result = null; draw(); });
+
+    const section = (title, list) => el("div", { style: "margin-top:12px" }, el("b", {}, title), fieldChips(list));
+    const run = async () => {
+      if (!s.file) return toast(pick("请先选择文件", "Choose a file first"), true);
+      const h = s.withHeader ? s.header : [], i = s.withItems ? s.items : [];
+      if (!h.length && !i.length) return toast(pick("请至少添加一个字段", "Add at least one field"), true);
+      const fd = new FormData();
+      fd.append("file", s.file);
+      fd.append("header_fields", JSON.stringify(h));
+      fd.append("item_fields", JSON.stringify(i));
+      fd.append("instructions", s.instructions);
+      const p = presets.find((x) => x.key === s.modelKey);
+      if (p) { fd.append("provider", p.provider); fd.append("model", p.model); }
+      try {
+        s.result = await withOverlay("正在解析…", "Extracting…", () => api("POST", "/api/quick-extract", fd));
+        draw();
+      } catch (e) { toast(e.message, true); }
+    };
+
+    const r = s.result;
+    const resultPanel = r ? el("div", { class: "panel", style: "border-color:#93c5fd" },
+      el("div", { class: "row", style: "margin-bottom:8px" },
+        el("h3", { style: "margin:0" }, T("解析结果 ", "Result "),
+          el("span", { class: "small muted" }, L(() => pick("页码 ", "Pages ") + `${r.pages.join(", ")} · ${r.model_used}`))),
+        el("span", { class: "spacer" }),
+        el("button", { class: "primary", onclick: () => resultCsv(r.header_fields, r.item_fields, r.data, s.file.name.replace(/\.[^.]+$/, "")) },
+          T("⬇ 下载 CSV", "⬇ Download CSV"))),
+      r.issues.length ? el("ul", { class: "issues" }, r.issues.map((x) => el("li", { class: x.level }, L(() => loc(x.msg))))) : null,
+      r.notes ? el("div", { class: "small muted" }, T("AI 备注：", "AI notes: "), r.notes) : null,
+      r.header_fields.length ? el("table", { style: "margin-top:8px" }, el("tbody", {}, r.header_fields.map((f) =>
+        el("tr", {}, el("th", { style: "width:180px" }, f.label), el("td", {}, fmtVal(r.data.header[f.key])))))) : null,
+      r.data.items.length ? el("div", { class: "table-wrap", style: "margin-top:10px" }, el("table", {},
+        el("thead", {}, el("tr", {}, r.item_fields.map((f) => el("th", {}, f.label)))),
+        el("tbody", {}, r.data.items.map((row) => el("tr", {}, r.item_fields.map((f) => el("td", {}, fmtVal(row[f.key])))))))) : null) : null;
+
+    const formPanel = el("div", { class: "panel" },
+      el("h2", { style: "margin-top:0" }, T("快速抽取（无需模板）", "Quick extract (no template)")),
+      el("div", { class: "muted small", style: "margin-bottom:10px" },
+        T("上传一份文件，输入想要的字段名，直接解析并下载 CSV。文件和结果不会保存。", "Upload a file, type the field names you want, extract and download a CSV. Nothing is stored.")),
+      drop, picker,
+      el("label", { class: "field", style: "margin-top:12px" }, T("抽取模型", "Extraction model"),
+        el("select", { onchange: (e) => (s.modelKey = e.target.value) },
+          opt("default", L(() => pick(`默认（跟随设置：${cfg.settings.claude_model}）`, `Default (from settings: ${cfg.settings.claude_model})`)), s.modelKey),
+          presets.map((p) => opt(p.key, L(() => loc(p.label)), s.modelKey)))),
+      el("div", { class: "row", style: "margin-top:12px; gap:20px" },
+        el("label", {}, el("input", { type: "checkbox", checked: s.withHeader, onchange: (e) => { s.withHeader = e.target.checked; draw(); } }), " Extract Head Data"),
+        el("label", {}, el("input", { type: "checkbox", checked: s.withItems, onchange: (e) => { s.withItems = e.target.checked; draw(); } }), " Extract Detail Data")),
+      s.withHeader ? section(T("表头字段（每份文件一个值）", "Head fields (one value per document)"), s.header) : null,
+      s.withItems ? section(T("明细字段（表格的每一行）", "Detail fields (each table row)"), s.items) : null,
+      el("div", { style: "margin-top:12px" }, el("div", { class: "small muted" }, T("补充说明（可选）", "Extra instructions (optional)")),
+        el("textarea", { rows: 2, value: s.instructions, oninput: (e) => (s.instructions = e.target.value),
+          placeholder: T("例如：金额为空的行留空", "e.g. leave rows with an empty amount empty") })),
+      el("div", { style: "margin-top:12px" }, el("button", { class: "primary", onclick: run }, T("▶ 解析", "▶ Extract"))));
+
+    if (s.previewFor !== s.file) {
+      if (s.previewUrl) URL.revokeObjectURL(s.previewUrl);
+      s.previewFor = s.file;
+      s.previewUrl = s.file && /\.(pdf|jpe?g|png|webp|gif|bmp)$/i.test(s.file.name) ? URL.createObjectURL(s.file) : "";
+    }
+    const preview = s.previewUrl
+      ? el("iframe", { class: "pdf-frame", src: /\.pdf$/i.test(s.file.name) ? `${s.previewUrl}#navpanes=0&view=FitH` : s.previewUrl })
+      : el("div", { class: "panel muted", style: "text-align:center;padding:40px" },
+          s.file ? T("此文件类型无法预览（解析后仍可正常抽取）", "This file type cannot be previewed (extraction still works)")
+                 : T("选择文件后在这里预览", "The file is previewed here once chosen"));
+
+    $app.replaceChildren(el("div", { class: "split" },
+      el("div", { class: "left" }, preview),
+      el("div", { class: "right" }, formPanel, resultPanel)));
+  };
+  draw();
+}
+
 // ------------------------------------------------------------------- router
 function route() {
   clearTimeout(pollTimer);
@@ -240,6 +392,7 @@ function route() {
     format: () => viewFormat(id === "new" ? null : Number(id)),
     settings: () => (IS_ADMIN ? viewSettings() : viewDocs()),
     usage: () => viewUsage(),
+    quick: () => viewQuick(),
   };
   (views[section] || views.docs)().catch((e) => {
     $app.replaceChildren(el("div", { class: "panel" }, T("加载失败：", "Failed to load: "), e.message));
@@ -248,6 +401,9 @@ function route() {
 window.addEventListener("hashchange", route);
 
 // -------------------------------------------------------------- documents
+let selChanged = () => {};  // refreshes the selection-dependent buttons of the documents list
+let dragState = null;  // true/false while dragging over document rows to select/deselect them
+document.addEventListener("mouseup", () => { dragState = null; });
 const docsState = { selected: new Set(), mode: "per_template", formatId: "", fileType: "xlsx", filter: "", auto: true,
   batch: "", exported: "", uploadBatch: "new" };
 
@@ -528,7 +684,7 @@ async function viewDocs() {
 
   // Keep in step with SUPPORTED in backend/ingest.py. The server converts everything to PDF.
   const UPLOAD_EXTS = [".pdf", ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".eml", ".msg", ".xlsx", ".xlsm", ".csv"];
-  const fileInput = el("input", { type: "file", multiple: true, accept: UPLOAD_EXTS.join(","), style: "display:none",
+  const fileInput = el("input", { type: "file", multiple: true, accept: ".pdf,.jpg,.jpeg,.png,.webp,.bmp,.gif,.tif,.tiff,.eml,.msg,.xlsx,.xlsm,.csv", style: "display:none",
     onchange: () => upload(fileInput.files) });
   const drop = el("div", { class: "dropzone", onclick: () => fileInput.click() },
     el("div", { style: "font-size:15px;color:#374151" },
@@ -578,7 +734,8 @@ async function viewDocs() {
     const f = docsState.filter;
     if (!f) return true;
     if (f.startsWith("t:")) return String(d.template_id) === f.slice(2);
-    return d.status === f || (f === "review" && d.status === "done" && !d.verified && (d.errors || d.warnings));
+    if (f === "lowscore") return d.confidence && d.confidence.level !== "high" && !d.verified;
+  return d.status === f || (f === "review" && d.status === "done" && !d.verified && (d.errors || d.warnings));
   });
   const batchLabel = (b) => {
     const extra = `${b.docs}${pick(" 份", " docs")}${b.usage ? " · " + costText(b.usage) : ""}`;
@@ -600,9 +757,29 @@ async function viewDocs() {
     checked: filtered.length > 0 && filtered.every((d) => docsState.selected.has(d.id)),
     onchange: () => { filtered.forEach((d) => allBox.checked ? docsState.selected.add(d.id) : docsState.selected.delete(d.id)); viewDocs(); } });
 
-  const rows = filtered.map((d) => el("tr", {},
-    el("td", {}, el("input", { type: "checkbox", checked: docsState.selected.has(d.id),
-      onchange: (e) => { e.target.checked ? docsState.selected.add(d.id) : docsState.selected.delete(d.id); applyLang(exportBtn); } })),
+  // Shift+click selects a range; clicking an empty part of a row toggles it; dragging over rows selects them all.
+  const boxes = [];
+  let lastIdx = -1;
+  const setSel = (i, on) => {
+    on ? docsState.selected.add(filtered[i].id) : docsState.selected.delete(filtered[i].id);
+    boxes[i].checked = on;
+  };
+  const rows = filtered.map((d, i) => el("tr", {
+    onmousedown: (e) => {
+      if (e.target.closest("a, button, select, input") && !e.target.matches('input[type="checkbox"]')) return;
+      if (e.shiftKey && lastIdx >= 0) {
+        e.preventDefault();
+        const on = boxes[lastIdx].checked;
+        for (let k = Math.min(lastIdx, i); k <= Math.max(lastIdx, i); k++) setSel(k, on);
+        lastIdx = i; selChanged(); return;
+      }
+      e.preventDefault();
+      dragState = !boxes[i].checked;
+      setSel(i, dragState); lastIdx = i; selChanged();
+    },
+    onmouseenter: () => { if (dragState !== null) { setSel(i, dragState); selChanged(); } },
+  },
+    el("td", {}, (boxes[i] = el("input", { type: "checkbox", checked: docsState.selected.has(d.id), onclick: (e) => e.preventDefault() }))),
     el("td", {}, el("a", { href: `#/doc/${d.id}` }, d.filename)),
     el("td", { class: "small", style: "white-space:nowrap" }, L(() => loc(d.batch))),
     el("td", {}, d.page_count),
@@ -612,9 +789,12 @@ async function viewDocs() {
       d.verified ? [" ", el("span", { class: "badge verified" }, T("已核对", "Verified"))] : null,
       d.exported_at ? [" ", el("span", { class: "badge", title: L(() => pick("导出于 ", "Exported at ") + d.exported_at.replace("T", " ")) },
         T("已导出", "Exported"))] : null),
+    el("td", {}, scoreBadge(d.confidence)),
     el("td", {}, d.status === "done" ? d.items : ""),
     el("td", { class: "small", style: "white-space:nowrap", title: L(() => usageTitle(d.usage)) },
       d.usage ? [fmtTok(d.usage.tokens), el("span", { class: "muted" }, " · "), L(() => costText(d.usage))] : el("span", { class: "muted" }, "—")),
+    el("td", { class: "small", style: "white-space:nowrap" },
+      d.duration_ms ? L(() => fmtDuration(d.duration_ms)) : el("span", { class: "muted" }, "—")),
     el("td", {}, d.errors ? el("span", { class: "badge error" }, L(() => pick(`${d.errors} 错误`, `${d.errors} errors`))) : null, " ",
       d.warnings ? el("span", { class: "badge unmatched" }, L(() => pick(`${d.warnings} 提示`, `${d.warnings} warnings`))) : null),
     el("td", { style: "white-space:nowrap" },
@@ -637,6 +817,20 @@ async function viewDocs() {
     opt("", T("选择输出格式…", "Choose output format…"), docsState.formatId), formats.map((f) => opt(f.id, f.name, docsState.formatId)));
   formatSel.style.display = docsState.mode === "unified" ? "" : "none";
   const exportBtn = el("button", { class: "primary", onclick: () => guarded(exportBtn, doExport) }, L(exportLabel));
+  const redetectLabel = () => docsState.selected.size
+    ? pick(`重新识别选中（${docsState.selected.size}）`, `Re-detect selected (${docsState.selected.size})`)
+    : pick("重新识别选中", "Re-detect selected");
+  const redetectBtn = el("button", { disabled: !docsState.selected.size, onclick: () => guarded(redetectBtn, async () => {
+    const ids = filtered.filter((d) => docsState.selected.has(d.id) && !isBusy(d.status)).map((d) => d.id);
+    if (!ids.length) return;
+    if (!confirm(pick(`重新识别 ${ids.length} 份文档？会覆盖现有抽取结果。`, `Re-detect ${ids.length} document(s)? Existing results will be overwritten.`))) return;
+    const results = await Promise.allSettled(ids.map((i) => api("POST", `/api/documents/${i}/process`, { template_id: null })));
+    const failed = results.filter((r) => r.status === "rejected").length;
+    docsState.selected.clear();
+    toast(pick(`已提交 ${ids.length - failed} 份重新识别`, `Re-detect started for ${ids.length - failed} document(s)`) + (failed ? ` (${failed} failed)` : ""), !!failed);
+    viewDocs();
+  }) }, L(redetectLabel));
+  selChanged = () => { applyLang(exportBtn); applyLang(redetectBtn); redetectBtn.disabled = !docsState.selected.size; };
 
   async function doExport() {
     let ids = [...docsState.selected];
@@ -660,8 +854,8 @@ async function viewDocs() {
     viewDocs();
   }
 
-  const headers = [["文件", "File"], ["批次", "Batch"], ["页数", "Pages"], ["类型", "Type"], ["模板", "Template"], ["状态", "Status"],
-    ["明细行", "Items"], ["用量", "Usage"], ["问题", "Issues"], ["操作", "Actions"]];
+  const headers = [["文件", "File"], ["批次", "Batch"], ["页数", "Pages"], ["类型", "Type"], ["模板", "Template"], ["状态", "Status"], ["置信度", "Score"],
+    ["明细行", "Items"], ["用量", "Usage"], ["耗时", "Time"], ["问题", "Issues"], ["操作", "Actions"]];
 
   autoCtx = { docs, templates, formats, batches };
   autoBox = el("div");
@@ -701,6 +895,7 @@ async function viewDocs() {
           opt("yes", T("已导出", "Exported"), docsState.exported)),
         el("select", { onchange: (e) => { docsState.filter = e.target.value; viewDocs(); } },
           opt("", T("全部文档", "All documents"), docsState.filter), opt("review", T("待核对（有提示）", "Needs review (has warnings)"), docsState.filter),
+          opt("lowscore", T("置信度偏低（<90，未核对）", "Low confidence (<90, unverified)"), docsState.filter),
           opt("unmatched", T("未识别模板", "No template matched"), docsState.filter), opt("error", T("出错", "Error"), docsState.filter),
           opt("done", T("已完成", "Done"), docsState.filter),
           templates.map((t) => opt(`t:${t.id}`, L(() => pick("模板：", "Template: ") + t.name), docsState.filter))),
@@ -713,7 +908,7 @@ async function viewDocs() {
         formatSel,
         el("select", { onchange: (e) => (docsState.fileType = e.target.value) },
           opt("xlsx", "Excel", docsState.fileType), opt("csv", "CSV", docsState.fileType)),
-        exportBtn),
+        redetectBtn, exportBtn),
       docs.length ? usageBar : null,
       docs.length
         ? el("div", { class: "table-wrap" }, el("table", {},
@@ -738,12 +933,19 @@ async function viewDoc(id) {
   const tpl = templates.find((t) => t.id === doc.template_id);
   const idx = list.findIndex((d) => d.id === id);
   const summary = list[idx];
-  const prev = list[idx + 1], next = list[idx - 1]; // list is newest first
+  const prev = list[idx - 1], next = list[idx + 1]; // same order as the Documents list (newest first): Next goes down
 
   const firstPage = (doc.pages && doc.pages[0]) || 1;
   const frame = el("iframe", { class: "pdf-frame", src: `${BASE}/api/documents/${id}/file#page=${firstPage}&navpanes=0&view=FitH` });
 
   const tplSel = el("select", {}, opt("", T("自动识别", "Auto-detect"), ""), templates.map((t) => opt(t.id, t.name, doc.template_id)));
+  const redetectBtn = el("button", { disabled: isBusy(doc.status),
+    title: T("忽略当前模板，重新自动匹配模板并抽取", "Ignore the current template; match a template automatically and extract again"),
+    onclick: () => guarded(redetectBtn, async () => {
+      if (!confirm(pick("重新识别会覆盖当前抽取结果，继续？", "Re-detect will overwrite the current result. Continue?"))) return;
+      await api("POST", `/api/documents/${id}/process`, { template_id: null });
+      viewDoc(id);
+    }) }, T("重新识别", "Re-detect"));
   const rerunBtn = el("button", { disabled: isBusy(doc.status), onclick: () => guarded(rerunBtn, async () => {
     await api("POST", `/api/documents/${id}/process`, { template_id: tplSel.value ? Number(tplSel.value) : null });
     viewDoc(id);
@@ -756,7 +958,8 @@ async function viewDoc(id) {
       el("button", { disabled: !prev, onclick: () => (location.hash = `#/doc/${prev.id}`) }, T("上一份", "Previous")),
       el("button", { disabled: !next, onclick: () => (location.hash = `#/doc/${next.id}`) }, T("下一份", "Next"))),
     el("h2", { style: "margin:10px 0 6px" }, doc.filename, " ", statusBadge(doc.status),
-      doc.verified ? [" ", el("span", { class: "badge verified" }, T("已核对", "Verified"))] : null),
+      doc.verified ? [" ", el("span", { class: "badge verified" }, T("已核对", "Verified"))] : null,
+      doc.confidence ? [" ", T("置信度 ", "Score "), scoreBadge(doc.confidence)] : null),
     el("div", { class: "small muted" }, L(() =>
       pick(`${doc.page_count} 页 · ${doc.has_text ? "电子版" : "扫描件"}`, `${doc.page_count} pages · ${doc.has_text ? "Digital" : "Scanned"}`) +
       (summary ? pick(` · 批次：${loc(summary.batch)}${summary.exported_at ? " · 已导出" : ""}`,
@@ -769,7 +972,8 @@ async function viewDoc(id) {
       T("来源：", "Source: "), L(() => loc(doc.source))) : null,
     doc.timings?.total_ms ? el("div", { class: "small muted", style: "margin-top:4px" },
       T("耗时：", "Time: "), L(() => timingsText(doc.timings))) : null,
-    el("div", { class: "row", style: "margin-top:10px" }, T("模板：", "Template: "), tplSel, rerunBtn,
+    el("div", { class: "row", style: "margin-top:10px" }, T("模板：", "Template: "), tplSel, redetectBtn),
+    el("div", { class: "row compact", style: "margin-top:8px;flex-wrap:nowrap" }, rerunBtn,
       tpl ? el("a", { class: "btn", href: `#/template/${tpl.id}?doc=${id}` }, T("编辑模板", "Edit template")) : null,
       el("a", { class: "btn", href: `#/template/new?doc=${id}` }, T("用此文档新建模板", "New template from this document"))),
   );
@@ -794,7 +998,11 @@ async function viewDoc(id) {
       "Calls made on the template page (such as test extractions) are listed here only and are not included in document or batch totals."))) : null;
 
   const right = el("div", { class: "right" }, head, usagePanel);
-  $app.replaceChildren(el("div", { class: "split" }, el("div", { class: "left" }, frame), right));
+  $app.replaceChildren(el("div", { class: "split" }, el("div", { class: "left" },
+    el("div", { class: "row", style: "margin-bottom:8px" },
+      el("button", { disabled: !prev, onclick: () => (location.hash = `#/doc/${prev.id}`) }, T("上一份", "Previous")),
+      el("button", { disabled: !next, onclick: () => (location.hash = `#/doc/${next.id}`) }, T("下一份", "Next"))),
+    frame), right));
 
   if (isBusy(doc.status)) {
     right.append(el("div", { class: "panel empty" }, el("span", { class: "spin" }), L(() => statusText(doc.status)), "…"));
@@ -813,45 +1021,142 @@ async function viewDoc(id) {
         " Choose a template above and click “Re-extract with this template”, or click “New template from this document”.")));
     return;
   }
-  right.append(resultEditor(doc, tpl, () => viewDoc(id)));
+  // Show the PDF page a flagged cell came from (the server finds it by looking for the row's values in the page text).
+  let shownPage = 0;
+  const showPage = async (path) => {
+    try {
+      const { page } = await api("GET", `/api/documents/${id}/locate?path=${encodeURIComponent(path)}`);
+      if (!page || page === shownPage) return;
+      shownPage = page;
+      // The built-in PDF viewer ignores a change that only touches the #fragment, so the URL itself must differ.
+      frame.src = `${BASE}/api/documents/${id}/file?jump=${Date.now()}#page=${page}&navpanes=0&view=FitH`;
+    } catch (e) { console.warn("Could not locate the PDF page:", e); }
+  };
+  right.append(resultEditor(doc, tpl, () => viewDoc(id), next ? () => (location.hash = `#/doc/${next.id}`) : null, showPage));
 }
 
-function resultEditor(doc, tpl, reload) {
+let docKeyHandler = null;
+
+function resultEditor(doc, tpl, reload, goNext, showPage) {
   const data = structuredClone(doc.data);
   const levels = issueMap(doc.issues);
   const wrap = el("div");
 
-  if (doc.issues?.length || doc.notes) {
-    wrap.append(el("div", { class: "panel" },
-      el("b", {}, T("核对提示", "Review notes")),
-      el("ul", { class: "issues" }, (doc.issues || []).map((i) => el("li", { class: i.level }, L(() => loc(i.msg))))),
-      doc.notes ? el("div", { class: "small muted", style: "margin-top:6px" }, T("AI 备注：", "AI notes: "), doc.notes) : null));
+  const input = (f, value, onset, level, sized = false, path = "") => {
+    let node;
+    if (f.type === "boolean") {
+      node = el("select", { class: cellClass(level), onchange: (e) => onset(e.target.value === "" ? null : e.target.value === "true") },
+        opt("", "", value === null ? "" : String(value)), opt("true", T("是", "Yes"), String(value)), opt("false", T("否", "No"), String(value)));
+    } else {
+      // In the items table, size each input to its content so long IDs stay readable.
+      const size = sized ? Math.min(Math.max(fmtVal(value).length + 2, f.type === "date" ? 11 : 6), 40) : undefined;
+      node = el("input", { type: "text", value: fmtVal(value), class: cellClass(level), size,
+        placeholder: f.type === "date" ? "YYYY-MM-DD" : "", oninput: (e) => onset(e.target.value) });
+    }
+    if (path) {
+      node.dataset.path = path;
+      if (reviewed.has(path)) { node.classList.remove("cell-warn"); node.classList.add("cell-ok"); }
+    }
+    return node;
+  };
+
+  // Jump to the cell an issue is about: scroll it into the middle of the view, focus it and flash it.
+  const jump = (path) => {
+    const node = wrap.querySelector(`[data-path="${path}"]`);
+    if (!node) return false;
+    node.scrollIntoView({ behavior: "smooth", block: "center" });
+    node.focus({ preventScroll: true });
+    node.classList.remove("jump-flash"); void node.offsetWidth; node.classList.add("jump-flash");
+    return true;
+  };
+  const flagged = (doc.issues || []).filter((i) => i.path && i.path !== "items");
+  let navIdx = -1;
+  const reviewed = new Set();
+  const flagItems = new Map();  // path -> its line in the review notes
+  const refreshNav = () => {
+    navLabel.textContent = `${navIdx + 1} / ${flagged.length} · ${pick("已看过 ", "reviewed ")}${reviewed.size}`;
+    const last = navIdx === flagged.length - 1;
+    nextLabel.replaceChildren(last ? pick("到“保存并核对”▼ (F8)", "Go to Save & verify ▼ (F8)") : pick("下一个 ▼ (F8)", "Next flag ▼ (F8)"));
+  };
+  // Leaving a warning without changing it counts as "checked": the cell stops being yellow and its note is struck out.
+  const markReviewed = (i) => {
+    if (!i || i.level !== "warning" || reviewed.has(i.path)) return;
+    reviewed.add(i.path);
+    const node = wrap.querySelector(`[data-path="${i.path}"]`);
+    if (node) { node.classList.remove("cell-warn"); node.classList.add("cell-ok"); }
+    flagItems.get(i.path)?.classList.add("reviewed");
+  };
+  const go = (idx) => {
+    if (navIdx >= 0 && idx !== navIdx) markReviewed(flagged[navIdx]);
+    navIdx = idx;
+    jump(flagged[navIdx].path);
+    if (showPage) showPage(flagged[navIdx].path);
+    refreshNav();
+  };
+  let saveAnchor = null;  // the "Save & mark verified" button, set further down
+  const nextLabel = el("span", {}, T("下一个 ▼ (F8)", "Next flag ▼ (F8)"));
+  const step = (dir) => {
+    if (!flagged.length) return;
+    // Past the last flag the way on is the save button.
+    if (dir > 0 && navIdx === flagged.length - 1 && saveAnchor) {
+      markReviewed(flagged[navIdx]);
+      refreshNav();
+      saveAnchor.scrollIntoView({ behavior: "smooth", block: "center" });
+      saveAnchor.focus({ preventScroll: true });
+      saveAnchor.classList.remove("jump-flash"); void saveAnchor.offsetWidth; saveAnchor.classList.add("jump-flash");
+      return;
+    }
+    go((navIdx + dir + flagged.length) % flagged.length);
+  };
+  const navLabel = el("span", { class: "small muted" }, `– / ${flagged.length}`);
+  const where = (path) => {
+    const m = /^items\.(\d+)\.(.+)$/.exec(path || "");
+    if (m) {
+      const f = tpl.item_fields.find((x) => x.key === m[2]);
+      return pick(`第 ${+m[1] + 1} 行 · ${f ? f.label : m[2]}`, `Row ${+m[1] + 1} · ${f ? f.label : m[2]}`);
+    }
+    const h = /^header\.(.+)$/.exec(path || "");
+    if (h) { const f = tpl.header_fields.find((x) => x.key === h[1]); return f ? f.label : h[1]; }
+    return "";
+  };
+
+  // Stays at the top of the scrolling pane, so the flag navigation is always on screen.
+  if (flagged.length) {
+    wrap.append(el("div", { class: "flag-bar" },
+      el("span", { class: "flag-bar-title" }, L(() => pick(`⚠ ${flagged.length} 处需要核对`, `⚠ ${flagged.length} flags to review`))),
+      navLabel, el("span", { class: "spacer" }),
+      el("button", { class: "compact-btn", title: T("上一个（Shift+F8）", "Previous (Shift+F8)"), onclick: () => step(-1) },
+        T("▲ 上一个 (Shift+F8)", "▲ Previous (Shift+F8)")),
+      el("button", { class: "compact-btn primary", title: T("下一个（F8）", "Next (F8)"), onclick: () => step(1) }, nextLabel)));
   }
 
-  const input = (f, value, onset, level, sized = false) => {
-    if (f.type === "boolean") {
-      return el("select", { class: cellClass(level), onchange: (e) => onset(e.target.value === "" ? null : e.target.value === "true") },
-        opt("", "", value === null ? "" : String(value)), opt("true", T("是", "Yes"), String(value)), opt("false", T("否", "No"), String(value)));
-    }
-    // In the items table, size each input to its content so long IDs stay readable.
-    const size = sized ? Math.min(Math.max(fmtVal(value).length + 2, f.type === "date" ? 11 : 6), 40) : undefined;
-    return el("input", { type: "text", value: fmtVal(value), class: cellClass(level), size,
-      placeholder: f.type === "date" ? "YYYY-MM-DD" : "", oninput: (e) => onset(e.target.value) });
-  };
+  if (doc.issues?.length || doc.notes) {
+    wrap.append(el("div", { class: "panel" },
+      el("div", { class: "row" }, el("b", {}, T("核对提示", "Review notes"))),
+      el("ul", { class: "issues" }, (doc.issues || []).map((i) => {
+        const w = where(i.path);
+        const li = el("li", { class: i.level + (w ? " jumpable" : ""), title: w ? T("点击跳到对应单元格", "Click to jump to the cell") : "",
+          onclick: w ? () => go(flagged.indexOf(i)) : null },
+          w ? el("b", {}, w + "：") : null, L(() => loc(i.msg)));
+        if (w) flagItems.set(i.path, li);
+        return li;
+      })),
+      doc.notes ? el("div", { class: "small muted", style: "margin-top:6px" }, T("AI 备注：", "AI notes: "), doc.notes) : null));
+  }
 
   const hdr = el("div", { class: "hdr-form" },
     tpl.header_fields.map((f) => [
       el("div", { class: "lbl" + (f.required ? " req" : ""), title: f.description }, f.label),
-      input(f, data.header[f.key], (v) => (data.header[f.key] = v), levels[`header.${f.key}`]),
+      input(f, data.header[f.key], (v) => (data.header[f.key] = v), levels[`header.${f.key}`], false, `header.${f.key}`),
     ]));
-  wrap.append(el("div", { class: "panel" }, el("h3", { style: "margin-top:0" }, T("表头字段", "Header fields")), hdr));
+  if (tpl.header_fields.length) wrap.append(el("div", { class: "panel" }, el("h3", { style: "margin-top:0" }, T("表头字段", "Header fields")), hdr));
 
   if (tpl.item_fields.length) {
     const tbody = el("tbody");
     const renderRows = () => {
       tbody.replaceChildren(...data.items.map((row, ri) => el("tr", {},
         el("td", { class: "muted small" }, ri + 1),
-        tpl.item_fields.map((f) => el("td", {}, input(f, row[f.key], (v) => (row[f.key] = v), levels[`items.${ri}.${f.key}`], true))),
+        tpl.item_fields.map((f) => el("td", {}, input(f, row[f.key], (v) => (row[f.key] = v), levels[`items.${ri}.${f.key}`], true, `items.${ri}.${f.key}`))),
         el("td", {}, el("button", { class: "link danger", title: T("删除此行", "Delete this row"),
           onclick: () => { data.items.splice(ri, 1); renderRows(); } }, "✕")))));
     };
@@ -868,17 +1173,37 @@ function resultEditor(doc, tpl, reload) {
   }
 
   const save = (verified) => async () => {
-    await api("PUT", `/api/documents/${doc.id}/result`, { data, verified });
+    if (navIdx >= 0) markReviewed(flagged[navIdx]);
+    await api("PUT", `/api/documents/${doc.id}/result`, { data, verified, reviewed: [...reviewed] });
     toast(verified ? pick("已保存并标记为已核对", "Saved and marked as verified") : pick("已保存", "Saved"));
     reload();
   };
   const b1 = el("button", { class: "primary", onclick: () => guarded(b1, save(true)) }, T("保存并标记已核对", "Save & mark verified"));
+  saveAnchor = b1;
+  const saveNext = async () => {
+    if (navIdx >= 0) markReviewed(flagged[navIdx]);
+    await api("PUT", `/api/documents/${doc.id}/result`, { data, verified: true, reviewed: [...reviewed] });
+    toast(pick("已核对，跳到下一份", "Verified; moving to the next one"));
+    if (goNext) goNext(); else reload();
+  };
+  const b1n = el("button", { class: "primary", title: T("快捷键：Ctrl+Enter", "Shortcut: Ctrl+Enter"),
+    onclick: () => guarded(b1n, saveNext) }, T("核对并下一份 (Ctrl+Enter)", "Verify & next (Ctrl+Enter)"));
+  if (docKeyHandler) document.removeEventListener("keydown", docKeyHandler);
+  docKeyHandler = (e) => {
+    if (!location.hash.startsWith("#/doc/")) { document.removeEventListener("keydown", docKeyHandler); docKeyHandler = null; return; }
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !b1n.disabled) { e.preventDefault(); b1n.click(); }
+    if (e.key === "F8") { e.preventDefault(); step(e.shiftKey ? -1 : 1); }
+    // Enter in the flagged cell you are on = "this is fine, next".
+    if (e.key === "Enter" && !e.ctrlKey && !e.metaKey && !e.shiftKey && navIdx >= 0 &&
+        e.target?.dataset?.path === flagged[navIdx].path) { e.preventDefault(); step(1); }
+  };
+  document.addEventListener("keydown", docKeyHandler);
   const b2 = el("button", { onclick: () => guarded(b2, save(false)) }, T("仅保存", "Save only"));
   const b3 = el("button", { onclick: () => {
     if (!confirm(pick("放弃所有修改，恢复 AI 原始抽取结果？", "Discard all changes and restore the original AI result?"))) return;
     api("PUT", `/api/documents/${doc.id}/result`, { data: doc.original_data, verified: false }).then(reload, (e) => toast(e.message, true));
   } }, T("恢复 AI 原始结果", "Restore AI result"));
-  wrap.append(el("div", { class: "panel row" }, b1, b2, el("span", { class: "spacer" }), b3,
+  wrap.append(el("div", { class: "panel row" }, b1n, b1, b2, el("span", { class: "spacer" }), b3,
     el("div", { class: "small muted", style: "width:100%" }, T(
       "“已核对”的结果会作为该模板的参考样本，帮助以后同一供应商的文档抽得更准。",
       "Verified results are used as reference examples for this template, so future documents from the same vendor are extracted more accurately."))));
@@ -917,7 +1242,7 @@ async function viewTemplates() {
 }
 
 function emptyTemplate() {
-  return { name: "", keywords: [], page_rule: "", provider: "default", model: "", instructions: "", send_images: false, model_note: "",
+  return { name: "", keywords: [], page_rule: "", provider: "default", model: "", instructions: "", suggest_hint: "", send_images: false, model_note: "",
     header_fields: [], item_fields: [], items_label: "", unique_field: "", checks: [] };
 }
 
@@ -925,13 +1250,17 @@ async function viewTemplate(id, params) {
   const [docs, settings, hintList] = await Promise.all([api("GET", "/api/documents"), api("GET", "/api/settings"),
     api("GET", "/api/hints").catch(() => ({ hints: [] }))]);
   let hints = hintList.hints;  // recently used "extra instructions" for AI suggest fields
-  let hintText = "";
   FIELD_TYPES = settings.field_types || FIELD_TYPES;
   const tpl = id ? await api("GET", `/api/templates/${id}`) : emptyTemplate();
+  // Each template keeps its own AI-suggest instruction; a new template starts with an empty box.
+  let hintText = id ? (tpl.suggest_hint || "") : "";
   let docId = Number(params.get("doc")) || (docs.find((d) => id && d.template_id === id) || docs[0] || {}).id || null;
   let testResult = null;
   // Item table (rows) is optional: off for new templates, on for existing ones that already have item fields.
   let hasItems = tpl.item_fields.length > 0 || !!tpl.items_label;
+  let suggestModel = localStorage.getItem("suggestModel") || "";  // model that designs the fields; separate from the extraction model
+  let autoPick = localStorage.getItem("autoPickModel") !== "0";  // let AI suggest also choose the model (slower)
+  let hasHeader = !id || tpl.header_fields.length > 0 || !hasItems;  // an existing template with items only has no header
 
   const frame = el("iframe", { class: "pdf-frame" });
   const setFrame = () => { frame.src = docId ? `${BASE}/api/documents/${docId}/file#navpanes=0&view=FitH` : "about:blank"; };
@@ -949,7 +1278,59 @@ async function viewTemplate(id, params) {
       ...fields.map((f) => opt(f.key, L(() => pick(`${f.label}（${f.key}）`, `${f.label} (${f.key})`)), current)));
   };
 
+  let advancedFields = tpl.header_fields.concat(tpl.item_fields).some((f) => f.description || f.example || f.required || (f.type && f.type !== "text"));
   function fieldsTable(list, title) {
+    if (advancedFields) return fieldsTableFull(list, title);
+    const makeKey = (label) => {
+      const base = label.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "field";
+      let k = base, n = 2;
+      while (list.some((f) => f.key === k) || tpl.header_fields.concat(tpl.item_fields).some((f) => f.key === k)) k = `${base}_${n++}`;
+      return k;
+    };
+    const tags = el("div", { class: "tag-list" });
+    const addInput = el("input", { type: "text", class: "tag-input", placeholder: T("输入字段名，回车添加", "Type a field name and press Enter") });
+    const addBtn = el("button", { onclick: () => commit() }, T("+ 添加", "+ Add"));
+    const commit = () => {
+      const label = addInput.value.trim();
+      if (!label) return;
+      list.push({ key: makeKey(label), label, type: "text", required: false, description: "", example: "" });
+      addInput.value = "";
+      drawTags();
+      addInput.focus();
+    };
+    addInput.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); commit(); } };
+    function drawTags() {
+      tags.replaceChildren(...list.map((f, i) => {
+        const chip = el("span", { class: "tag", title: f.description || "" });
+        const showLabel = () => {
+          chip.replaceChildren(
+            el("span", { class: "tag-name", title: T("点击改名", "Click to rename"), onclick: edit }, f.label || f.key),
+            el("button", { class: "tag-x", title: T("删除", "Remove"), onclick: () => { list.splice(i, 1); drawTags(); } }, "×"));
+        };
+        const edit = () => {
+          const inp = el("input", { type: "text", class: "tag-edit", value: f.label, size: Math.max(6, f.label.length + 1) });
+          const done = (keep) => {
+            const v = inp.value.trim();
+            if (keep && v) { f.label = v; if (!f.key) f.key = makeKey(v); }
+            showLabel();
+          };
+          inp.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); done(true); } if (e.key === "Escape") done(false); };
+          inp.onblur = () => done(true);
+          chip.replaceChildren(inp);
+          inp.focus(); inp.select();
+        };
+        showLabel();
+        return chip;
+      }));
+    }
+    drawTags();
+    return el("div", { class: "panel" },
+      el("div", { class: "row" }, el("h3", { style: "margin:0" }, title), el("span", { class: "spacer" }),
+        el("button", { class: "link", onclick: () => { advancedFields = true; render(); } }, T("高级设置（类型、说明、示例）", "Advanced (type, description, example)"))),
+      tags, el("div", { class: "row", style: "margin-top:8px" }, addInput, addBtn));
+  }
+
+  function fieldsTableFull(list, title) {
     const body = el("tbody", {}, list.map((f, i) => el("tr", {},
       el("td", { style: "width:14%" }, el("input", { type: "text", value: f.label, placeholder: T("名称", "Label"), oninput: (e) => (f.label = e.target.value) })),
       el("td", { style: "width:13%" }, el("input", { type: "text", value: f.key, placeholder: T("英文 key", "English key"), oninput: (e) => (f.key = e.target.value) })),
@@ -970,6 +1351,7 @@ async function viewTemplate(id, params) {
       ["说明（越具体越准）", "Description (the more specific, the more accurate)"], ["示例", "Example"], ["", ""]];
     return el("div", { class: "panel" },
       el("div", { class: "row" }, el("h3", { style: "margin:0" }, title), el("span", { class: "spacer" }),
+        el("button", { class: "link", onclick: () => { advancedFields = false; render(); } }, T("简洁视图", "Simple view")),
         el("button", { onclick: () => { list.push({ key: "", label: "", type: "text", required: false, description: "", example: "" }); render(); } },
           T("+ 添加字段", "+ Add field"))),
       list.length ? el("table", { class: "fields-table", style: "margin-top:8px" },
@@ -981,9 +1363,24 @@ async function viewTemplate(id, params) {
     if (!testResult) return null;
     const r = testResult;
     const levels = issueMap(r.issues);
-    return el("div", { class: "panel", style: "border-color:#93c5fd" },
-      el("h3", { style: "margin-top:0" }, T("试抽取结果 ", "Test extraction result "),
-        el("span", { class: "small muted" }, L(() => pick("页码 ", "Pages ") + `${r.pages.join(", ")} · ${r.model_used}`))),
+    const downloadCsv = () => {
+      const cols = [...tpl.header_fields, ...tpl.item_fields];
+      const q = (v) => { const s = v == null ? "" : String(v); return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+      const rows = r.data.items.length ? r.data.items : [{}];
+      const lines = [cols.map((f) => q(f.label)).join(",")];
+      for (const row of rows) {
+        lines.push(cols.map((f) => q(tpl.header_fields.includes(f) ? r.data.header[f.key] : row[f.key])).join(","));
+      }
+      const url = URL.createObjectURL(new Blob(["\ufeff" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" }));
+      const a = el("a", { href: url, download: `${tpl.name || "test-extraction"}_${new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16).replace("T", "_").replace(":", "")}.csv` });
+      document.body.append(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+    };
+    return el("div", { class: "panel test-result flash", style: "border-color:#93c5fd" },
+      el("div", { class: "row", style: "margin-bottom:8px" },
+        el("h3", { style: "margin:0" }, T("试抽取结果 ", "Test extraction result "),
+          el("span", { class: "small muted" }, L(() => pick("页码 ", "Pages ") + `${r.pages.join(", ")} · ${r.model_used}`))),
+        el("span", { class: "spacer" }),
+        el("button", { onclick: downloadCsv }, T("⬇ 下载 CSV", "⬇ Download CSV"))),
       r.issues.length ? el("ul", { class: "issues" }, r.issues.map((i) => el("li", { class: i.level }, L(() => loc(i.msg)))))
         : el("div", { style: "color:var(--ok)" }, T("✓ 没有发现问题", "✓ No issues found")),
       r.notes ? el("div", { class: "small muted" }, T("AI 备注：", "AI notes: "), r.notes) : null,
@@ -1012,6 +1409,19 @@ async function viewTemplate(id, params) {
       if (sumItem.value && sumHead.value) tpl.checks.push({ type: "sum", item_field: sumItem.value, header_field: sumHead.value, tolerance: 0.01 });
     }
 
+    const headerToggle = el("input", { type: "checkbox", checked: hasHeader, onchange: (e) => {
+      if (e.target.checked) hasHeader = true;
+      else {
+        if (tpl.header_fields.length &&
+          !confirm(pick("取消后会清除已有的表头字段、查重字段和合计校验，继续？", "This clears the existing header fields, duplicate check and sum check. Continue?"))) {
+          e.target.checked = true;
+          return;
+        }
+        hasHeader = false;
+        Object.assign(tpl, { header_fields: [], unique_field: "", checks: tpl.checks.filter((c) => c.type !== "sum") });
+      }
+      render();
+    } });
     const itemsToggle = el("input", { type: "checkbox", checked: hasItems, onchange: (e) => {
       if (e.target.checked) hasItems = true;
       else {
@@ -1047,9 +1457,13 @@ async function viewTemplate(id, params) {
       if (!docId) throw new Error(needSample());
       if ((tpl.header_fields.length || tpl.item_fields.length) &&
         !confirm(pick("AI 推荐会替换当前的字段设置，继续？", "AI suggestions will replace the current fields. Continue?"))) return;
-      const s = await api("POST", "/api/templates/suggest", { doc_id: docId, hint: hint.value, lang: LANG, with_items: hasItems });
+      const s = await withOverlay("AI 正在分析文档并推荐字段，请稍候…", "AI is analysing the document and suggesting fields, please wait…",
+        () => api("POST", "/api/templates/suggest", { doc_id: docId, hint: hint.value, lang: LANG, with_items: hasItems ? true : null, with_header: hasHeader ? null : false,
+          auto_model: autoPick, suggest_model: suggestModel || null }));
       hints = (await api("GET", "/api/hints")).hints;  // the server just remembered this one
       Object.assign(tpl, s, { name: tpl.name || s.name });
+      hasItems = s.item_fields.length > 0 || !!s.items_label;  // the AI decides whether the document has an item table
+      hasHeader = s.header_fields.length > 0 || !hasItems;
       testResult = null;
       render();
       toast(pick("已生成推荐字段，请检查后保存。", "Suggested fields are ready; review them, then save. ") + loc(s.model_note));
@@ -1093,11 +1507,14 @@ async function viewTemplate(id, params) {
       manualInput()) : el("div");
     const testBtn = el("button", { onclick: () => guarded(testBtn, async () => {
       if (!docId) throw new Error(needSample());
-      testResult = await api("POST", "/api/templates/test", { doc_id: docId, template: tpl, template_id: id });
+      testResult = await withOverlay("正在试抽取，请稍候…", "Running test extraction, please wait…",
+        () => api("POST", "/api/templates/test", { doc_id: docId, template: tpl, template_id: id }));
       render();
+      document.querySelector(".test-result")?.scrollIntoView({ behavior: "smooth", block: "center" });
     }) }, T("▶ 试抽取", "▶ Test extraction"));
     const saveBtn = el("button", { class: "primary", onclick: () => guarded(saveBtn, async () => {
       if (!tpl.name.trim()) throw new Error(pick("请填写模板名称", "Enter a template name"));
+      tpl.suggest_hint = hintText.trim();
       const saved = id ? await api("PUT", `/api/templates/${id}`, tpl) : await api("POST", "/api/templates", tpl);
       toast(pick("模板已保存", "Template saved"));
       if (!id) location.hash = `#/template/${saved.id}${docId ? "?doc=" + docId : ""}`;
@@ -1108,7 +1525,19 @@ async function viewTemplate(id, params) {
       el("div", { class: "panel" },
         el("div", { class: "row" }, el("a", { href: "#/templates" }, T("← 模板列表", "← Templates")), el("span", { class: "spacer" }), testBtn, saveBtn),
         el("h2", { style: "margin:10px 0" }, id ? L(() => pick("编辑模板：", "Edit template: ") + tpl.name) : T("新建模板", "New template")),
-        el("div", { class: "row", style: "margin-bottom:12px" }, suggestBtn, hint, recentHints, forgetHint),
+        el("div", { class: "row", style: "margin-bottom:12px" }, suggestBtn, hint, recentHints, forgetHint,
+          el("select", { style: "max-width:200px",
+            title: T("用哪个模型来设计字段（只影响“AI 推荐字段”，与下面的“抽取模型”无关）",
+              "Which model designs the fields (only affects “AI suggest fields”; independent of the extraction model below)"),
+            onchange: (e) => { suggestModel = e.target.value; localStorage.setItem("suggestModel", suggestModel); } },
+            opt("", T("推荐模型：默认（Sonnet）", "Suggest with: default (Sonnet)"), suggestModel),
+            (settings.model_presets || []).map((p) => opt(p.key, L(() => pick("推荐模型：", "Suggest with: ") + loc(p.short || p.label)), suggestModel))),
+          el("label", { class: "small", style: "white-space:nowrap",
+            title: T("勾选：推荐字段后会用样本页试抽取并自动选模型（更慢、更准）。取消：保持下面选定的模型，速度快。",
+              "On: after suggesting fields, sample pages are test-extracted to pick a model (slower, safer). Off: keep the model selected below (faster).") },
+            el("input", { type: "checkbox", checked: autoPick, onchange: (e) => {
+              autoPick = e.target.checked; localStorage.setItem("autoPickModel", autoPick ? "1" : "0");
+            } }), T(" 自动选模型", " Auto-pick model"))),
         el("div", { class: "grid2" },
           el("label", { class: "field" }, T("模板名称", "Template name"), el("input", { type: "text", value: tpl.name,
             placeholder: T("如：United Logistics 发票", "e.g. United Logistics Invoice"), oninput: (e) => (tpl.name = e.target.value) })),
@@ -1139,14 +1568,19 @@ async function viewTemplate(id, params) {
             placeholder: T("如：金额列为空的行保持为空，不要自己分摊", "e.g. leave rows with an empty amount empty; don't split amounts yourself"),
             oninput: (e) => (tpl.instructions = e.target.value) })),
         el("label", { style: "display:block;margin-top:10px" }, itemsToggle,
-          T(" 这份文档有明细表（表格的每一行都要抽取）", " This document has an item table (every table row is extracted)"),
+          T(" 抽取明细数据", " Extract Detail Data"),
           el("span", { class: "small muted" }, T(
             " 默认不需要。勾选后才会出现明细字段、明细表名称和合计校验，AI 推荐字段时也会一并推荐明细字段。",
             " Off by default. Turn it on to get item fields, an items table name and the sum check; AI suggestions then include item fields too."))),
-        el("div", { class: "row", style: "margin-top:10px" },
+        el("label", { style: "display:block;margin-top:10px" }, headerToggle,
+          T(" 抽取表头数据", " Extract Head Data"),
+          el("span", { class: "small muted" }, T(
+            " 只需要明细表时取消勾选。",
+            " Turn it off if you only need the item table."))),
+        hasHeader ? el("div", { class: "row", style: "margin-top:10px" },
           T("查重字段：", "Duplicate check field: "), uniqSel,
-          hasItems ? [el("span", { style: "width:20px" }), T("合计校验：明细", "Sum check: items"), sumItem, T("之和 = 表头", "total = header"), sumHead] : null)),
-      fieldsTable(tpl.header_fields, T("表头字段（每份文档一个值）", "Header fields (one value per document)")),
+          hasItems ? [el("span", { style: "width:20px" }), T("合计校验：明细", "Sum check: items"), sumItem, T("之和 = 表头", "total = header"), sumHead] : null) : null),
+      hasHeader ? fieldsTable(tpl.header_fields, T("表头字段（每份文档一个值）", "Header fields (one value per document)")) : null,
       hasItems ? fieldsTable(tpl.item_fields, T("明细字段（表格的每一行）", "Item fields (each table row)")) : null,
       testPanel(),
     );

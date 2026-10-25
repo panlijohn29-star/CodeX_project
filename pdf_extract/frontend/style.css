@@ -22,6 +22,12 @@ h3 { margin: 18px 0 10px; font-size: 15px; }
 
 button, .btn { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid var(--line); background: #fff; cursor: pointer; color: var(--text); text-decoration: none; display: inline-block; }
 button:hover { border-color: #b6bcc5; }
+.badge.score { font-weight: 600; cursor: help; }
+.badge.score.high { background: #dcfce7; color: #166534; }
+.badge.score.medium { background: #fef3c7; color: #92400e; }
+.badge.score.low { background: #fee2e2; color: #b42318; }
+.row.compact { gap: 6px; }
+.row.compact > button, .row.compact > .btn { font-size: 13px; padding: 4px 10px; white-space: nowrap; }
 button.primary { background: var(--primary); color: #fff; border-color: var(--primary); }
 button.primary:hover { background: var(--primary-d); }
 button.danger { color: var(--err-b); }
@@ -63,11 +69,31 @@ td input, td select { width: 100%; }
 .issues { margin: 0; padding-left: 18px; }
 .issues li.error { color: #b42318; }
 .issues li.warning { color: #8a6100; }
+.issues li.reviewed { text-decoration: line-through; opacity: .55; }
+.issues li.reviewed::after { content: " ✓"; color: #166534; }
+input.cell-ok, select.cell-ok { background: #f0fdf4; border-color: #86efac; }
+.issues li.jumpable { cursor: pointer; }
+.issues li.jumpable:hover { text-decoration: underline; }
+.flag-bar { position: sticky; top: 0; z-index: 6; display: flex; align-items: center; gap: 10px; padding: 8px 12px; margin-bottom: 10px;
+  background: #fffbeb; border: 1px solid #fcd34d; border-radius: 8px; box-shadow: 0 2px 8px rgba(0, 0, 0, .12); }
+.flag-bar-title { font-weight: 600; color: #92400e; }
+.flag-bar .spacer { flex: 1; }
+button.compact-btn { font-size: 13px; padding: 3px 10px; }
+.jump-flash { animation: jump-flash 1.4s ease-out; }
+@keyframes jump-flash { 0% { box-shadow: 0 0 0 0 rgba(37, 99, 235, .8); outline: 2px solid #2563eb; } 100% { box-shadow: 0 0 0 12px rgba(37, 99, 235, 0); outline: 2px solid transparent; } }
 .hdr-form { display: grid; grid-template-columns: 160px 1fr; gap: 6px 12px; align-items: center; }
 .hdr-form .lbl { font-size: 13px; color: var(--muted); text-align: right; }
 .hdr-form .lbl.req::after { content: " *"; color: var(--err-b); }
 
 .fields-table td { padding: 4px; }
+.tag-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.tag { display: inline-flex; align-items: center; gap: 6px; padding: 4px 6px 4px 12px; border: 1px solid var(--line); border-radius: 8px; background: #f8fafc; }
+.tag-name { cursor: text; }
+.tag-name:hover { color: var(--primary); }
+button.tag-x { border: 0; background: none; padding: 0 4px; color: #9ca3af; font-size: 16px; line-height: 1; cursor: pointer; }
+button.tag-x:hover { color: #dc2626; }
+input.tag-edit { width: auto; padding: 2px 6px; }
+input.tag-input { flex: 1; }
 .fields-table input[type=checkbox] { width: auto; }
 .mapping-table td:first-child { white-space: nowrap; font-weight: 500; width: 180px; }
 
@@ -75,6 +101,10 @@ td input, td select { width: 100%; }
 #toast div { background: #111827; color: #fff; padding: 10px 16px; border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,.2); max-width: 420px; }
 #toast div.err { background: #b42318; }
 .spin { display: inline-block; width: 12px; height: 12px; border: 2px solid #93c5fd; border-top-color: transparent; border-radius: 50%; animation: spin 1s linear infinite; vertical-align: -1px; margin-right: 4px; }
+.busy-overlay { position: fixed; inset: 0; z-index: 1000; background: rgba(0, 0, 0, .55); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; color: #fff; font-size: 15px; }
+.busy-overlay .big-spin { width: 56px; height: 56px; border: 5px solid rgba(255, 255, 255, .3); border-top-color: #fff; border-radius: 50%; animation: spin 1s linear infinite; }
+.test-result.flash { animation: flash-border 1.6s ease-out 2; }
+@keyframes flash-border { 0% { box-shadow: 0 0 0 0 rgba(37, 99, 235, .6); } 100% { box-shadow: 0 0 0 14px rgba(37, 99, 235, 0); } }
 @keyframes spin { to { transform: rotate(360deg); } }
 .empty { text-align: center; color: var(--muted); padding: 30px; }
 

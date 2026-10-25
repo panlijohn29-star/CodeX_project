@@ -5,7 +5,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import pymupdf
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -26,6 +26,7 @@ async def no_cache_frontend(request, call_next):
 
 
 USAGE_SOURCES = {"pipeline": bi("文档处理", "Processing"), "template_test": bi("模板试抽取", "Template test"),
+                 "quick_extract": bi("快速抽取", "Quick extract"),
                  "template_suggest": bi("AI 推荐字段", "AI field suggestion"), "mapping": bi("AI 字段对应", "AI field mapping"),
                  "auto_template": bi("批量建模板", "Batch templating"), "other": bi("其他", "Other")}
 USAGE_PURPOSES = {"classify": bi("识别模板", "Template detection"), "select_pages": bi("筛选页面", "Page filtering"),
@@ -124,6 +125,7 @@ class Template(BaseModel):
     provider: str = "default"
     model: str = ""
     instructions: str = ""
+    suggest_hint: str = ""
     send_images: bool = False
     model_note: str = ""
     header_fields: list[dict] = []
@@ -170,9 +172,18 @@ def create_template(t: Template):
 
 @app.put("/api/templates/{tid}")
 def update_template(tid: int, t: Template):
-    _404(db.get("templates", tid), TPL)
+    old = _404(db.get("templates", tid), TPL)
     db.update("templates", tid, _template_values(t))
-    return db.get("templates", tid)
+    tpl = db.get("templates", tid)
+    # Issues are stored per document, so re-check the finished ones when the rules changed (e.g. a field made required).
+    rule_keys = ("header_fields", "item_fields", "checks", "unique_field")
+    if any(old.get(k) != tpl.get(k) for k in rule_keys):
+        docs = [d for d in db.list_rows("documents", "template_id=? AND data IS NOT NULL", (tid,))]
+        for d in docs:
+            if d["status"] == "done":
+                db.update("documents", d["id"], {"issues": validate.validate(
+                    d["id"], tpl, d["data"], d.get("uncertain") or [], others=docs)})
+    return tpl
 
 
 @app.delete("/api/templates/{tid}")
@@ -189,7 +200,9 @@ class SuggestReq(BaseModel):
     hint: str = ""
     auto_model: bool = True
     lang: str = "en"
-    with_items: bool = False  # also design the item table
+    with_items: bool | None = None  # True: design the item table; None: let the AI decide
+    suggest_model: str | None = None  # preset key of the model that designs the template (None: Claude Sonnet)
+    with_header: bool | None = None  # False: no header fields (items only); None: let the AI decide
 
 
 @app.get("/api/hints")
@@ -228,7 +241,8 @@ def suggest_template(req: SuggestReq):
     db.add_recent("hints", req.hint)  # remembered even if the AI call fails, so it can be reused or edited
     try:
         with llm.usage_scope(req.doc_id, "template_suggest"):
-            draft = extractor.suggest_template(doc, req.hint, req.lang, req.with_items)
+            draft = extractor.suggest_template(doc, req.hint, req.lang, req.with_items, req.with_header,
+                                               req.suggest_model)
             if req.auto_model:
                 try:
                     pick = extractor.pick_model(doc, draft)
@@ -286,6 +300,53 @@ def test_template(req: TestReq):
     return res
 
 
+# ------------------------------------------------------------- quick extract
+
+@app.post("/api/quick-extract")
+def quick_extract(file: UploadFile = File(...), header_fields: str = Form("[]"), item_fields: str = Form("[]"),
+                  instructions: str = Form(""), provider: str = Form("default"), model: str = Form("")):
+    """One-off extraction without a template: the file and the result are not kept."""
+    try:
+        h, i = json.loads(header_fields), json.loads(item_fields)
+    except ValueError:
+        raise HTTPException(400, bi("字段格式无效", "Invalid field list"))
+    h, i = extractor.clean_fields(h), extractor.clean_fields(i)
+    if not h and not i:
+        raise HTTPException(400, bi("请至少添加一个字段", "Add at least one field"))
+    try:
+        converted = ingest.convert(file.filename or "", file.file.read())
+    except ingest.IngestError as e:
+        raise HTTPException(400, e.msg)
+    it = converted[0]
+    path = config.UPLOAD_DIR / f"quick_{datetime.now().strftime('%Y%m%d%H%M%S%f')}.pdf"
+    path.write_bytes(it.pdf)
+    did = None
+    try:
+        info = pdf_utils.inspect(str(path))
+        did = db.insert("documents", {"filename": it.filename, "stored_path": str(path), "page_count": info["page_count"],
+                                      "has_text": int(info["has_text"]), "file_hash": it.digest, "status": "quick"})
+        doc = db.get("documents", did)
+        tpl = {"id": -1, "name": it.filename, "keywords": [], "page_rule": "", "provider": provider or "default",
+               "model": model, "instructions": instructions.strip(), "send_images": False, "header_fields": h, "item_fields": i,
+               "items_label": "", "unique_field": "", "checks": []}
+        with llm.usage_scope(None, "quick_extract"):  # the document is deleted afterwards, so no doc_id
+            pages = extractor.select_pages(doc, tpl)
+            res = extractor.extract(doc, tpl, pages)
+        res["pages"] = pages
+        res["issues"] = validate.validate(did, tpl, res["data"], res["uncertain"])
+        res["header_fields"], res["item_fields"] = h, i
+        return res
+    except llm.LLMError as e:
+        raise HTTPException(400, e.msg)
+    finally:
+        if did:
+            db.delete("documents", did)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 # ----------------------------------------------------------------- documents
 
 def _batch_labels() -> dict:
@@ -319,7 +380,14 @@ def list_documents():
     names = {t["id"]: t["name"] for t in db.list_rows("templates")}
     batches = _batch_labels()
     doc_usage = _pipeline_usage("doc_id")
-    return [_doc_summary(d, names, batches, doc_usage) for d in db.list_rows("documents")]
+    tpls = {t["id"]: t for t in db.list_rows("templates")}
+    out = []
+    for d in db.list_rows("documents"):
+        s = _doc_summary(d, names, batches, doc_usage)
+        c = validate.confidence(d, tpls.get(d["template_id"]))
+        s["confidence"] = c
+        out.append(s)
+    return out
 
 
 class FieldSpec(BaseModel):
@@ -461,7 +529,9 @@ async def upload_documents(files: list[UploadFile] = File(...), auto: bool = Tru
 
 @app.get("/api/documents/{did}")
 def get_document(did: int):
-    return _404(db.get("documents", did), DOC)
+    d = _404(db.get("documents", did), DOC)
+    tpl = db.get("templates", d["template_id"]) if d["template_id"] else None
+    return {**d, "confidence": validate.confidence(d, tpl)}
 
 
 @app.get("/api/documents/{did}/file")
@@ -470,6 +540,44 @@ def get_document_file(did: int):
     name = d["filename"] if d["filename"].lower().endswith(".pdf") else d["filename"] + ".pdf"  # converted uploads
     return FileResponse(d["stored_path"], media_type="application/pdf",
                         headers={"Content-Disposition": f"inline; filename*=UTF-8''{quote(name)}"})
+
+
+_PAGE_TEXT_CACHE: dict = {}
+
+
+def _norm_text(s: str) -> str:
+    return re.sub(r"\s+", " ", s or "").strip().lower()
+
+
+@app.get("/api/documents/{did}/locate")
+def locate_in_document(did: int, path: str):
+    """Which PDF page a result cell (items.N.key / header.key) was read from, found by looking for the row's values
+    in the page text. Returns {"page": n | null}."""
+    d = _404(db.get("documents", did), DOC)
+    data = d.get("data") or {}
+    m = re.fullmatch(r"items\.(\d+)\.(.+)", path)
+    if m:
+        rows = data.get("items") or []
+        row = rows[int(m.group(1))] if int(m.group(1)) < len(rows) else {}
+        values = list(row.values())
+    else:
+        h = re.fullmatch(r"header\.(.+)", path)
+        values = [(data.get("header") or {}).get(h.group(1))] if h else []
+    needles = [_norm_text(str(v)) for v in values if v not in (None, "") and len(_norm_text(str(v))) >= 2]
+    if not needles:
+        return {"page": None}
+    key = (d["stored_path"], Path(d["stored_path"]).stat().st_mtime)
+    if key not in _PAGE_TEXT_CACHE:
+        if len(_PAGE_TEXT_CACHE) > 8:
+            _PAGE_TEXT_CACHE.clear()
+        _PAGE_TEXT_CACHE[key] = [(n, _norm_text(t)) for n, t in
+                                 pdf_utils.page_texts(d["stored_path"], list(range(1, d["page_count"] + 1)))]
+    best, best_score = None, 0
+    for n, text in _PAGE_TEXT_CACHE[key]:
+        score = sum(len(x) for x in needles if x in text)
+        if score > best_score:
+            best, best_score = n, score
+    return {"page": best}
 
 
 @app.get("/api/documents/{did}/usage")
@@ -545,6 +653,7 @@ def process_document(did: int, req: ProcessReq):
 class SaveReq(BaseModel):
     data: dict
     verified: bool = True
+    reviewed: list[str] = []  # flagged cells the person looked at and left as they were
 
 
 @app.put("/api/documents/{did}/result")
@@ -557,8 +666,15 @@ def save_result(did: int, req: SaveReq):
     if req.verified:
         uncertain = []
     issues = validate.validate(did, tpl, data, uncertain)
-    db.update("documents", did, {"data": data, "issues": issues, "uncertain": uncertain,
-                                 "verified": int(req.verified), "exported_at": None})
+    values = {"data": data, "issues": issues, "uncertain": uncertain,
+              "verified": int(req.verified), "exported_at": None}
+    if req.verified:
+        # Keep what the person fixed and what they checked and left alone; later extractions learn from the first.
+        corrections = extractor.diff_corrections(d.get("original_data"), data, tpl)
+        fixed = {c["path"] for c in corrections}
+        confirmed = sorted(set(d.get("confirmed_flags") or []) | set(req.reviewed)) 
+        values.update(corrections=corrections, confirmed_flags=[p for p in confirmed if p not in fixed])
+    db.update("documents", did, values)
     return db.get("documents", did)
 
 

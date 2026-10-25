@@ -1,6 +1,8 @@
 """Template matching, page selection, extraction and AI-assisted template/mapping suggestions."""
+import contextvars
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 
 from . import db, i18n, llm, pdf_utils, validate
 from .i18n import bi
@@ -112,6 +114,41 @@ def _examples(template_id: int, exclude_doc: int | None, limit: int) -> list[dic
     return [r["data"] for r in rows[:limit] if r.get("data")]
 
 
+CORRECTION_LINES = 12   # most corrections shown to the model
+CORRECTION_DOCS = 6     # most recent verified documents searched for corrections
+
+
+def _correction_notes(template: dict, exclude_doc: int | None) -> str:
+    """Mistakes the AI made on earlier documents of this template and what a person changed them to. Shown in the
+    prompt so the same mistake is not repeated; only the corrected cells (with their row), so it stays short."""
+    if template.get("id", -1) < 0:
+        return ""
+    rows = db.list_rows("documents", "template_id=? AND verified=1 AND id!=? AND corrections!='[]'",
+                        (template["id"], exclude_doc or -1), order="updated_at DESC")[:CORRECTION_DOCS]
+    labels = {f["key"]: f.get("label") or f["key"] for f in template["header_fields"] + template["item_fields"]}
+    seen, lines = set(), []
+    for r in rows:
+        items = (r.get("data") or {}).get("items") or []
+        for c in r.get("corrections") or []:
+            m = re.fullmatch(r"items\.(\d+)\.(.+)", c["path"])
+            key = m.group(2) if m else c["path"].split(".", 1)[-1]
+            ai, ok = c.get("ai"), c.get("correct")
+            if ai is None or ok is None or len(str(ai)) > 120 or len(str(ok)) > 120:
+                continue  # an added or removed row is not a wrong value
+            sig = (key, str(ai), str(ok))
+            if sig in seen:
+                continue
+            seen.add(sig)
+            ctx = ""
+            if m and int(m.group(1)) < len(items):
+                ctx = "；所在行：" + json.dumps(items[int(m.group(1))], ensure_ascii=False)
+            lines.append(f"- 「{labels.get(key, key)}」AI 曾抽成 {json.dumps(ai, ensure_ascii=False)}，人工更正为 "
+                         f"{json.dumps(ok, ensure_ascii=False)}{ctx}")
+            if len(lines) >= CORRECTION_LINES:
+                return "\n".join(lines)
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------- matching
 
 def _norm(s: str) -> str:
@@ -212,7 +249,46 @@ def select_pages(doc: dict, template: dict, preselected: list[int] | None = None
 
 # -------------------------------------------------------------- extraction
 
-def extract(doc: dict, template: dict, pages: list[int]) -> dict:
+SUGGEST_SAMPLE_PAGES = 8  # pages shown to the AI when it designs a template
+PICK_SAMPLE_PAGES = 5     # pages used to compare models when picking one automatically
+
+
+def sample_pages(pages: list[int], n: int) -> list[int]:
+    """At most n pages spread evenly over the list, always including the first and the last."""
+    if len(pages) <= n:
+        return pages
+    idx = sorted({round(i * (len(pages) - 1) / (n - 1)) for i in range(n)})
+    return [pages[i] for i in idx]
+
+
+CHUNK_PAGES = 3    # pages read per call when a template has an item table
+EXAMPLE_ROWS = 5   # item rows kept from each verified example in the prompt
+
+
+MAX_PARALLEL = 4  # chunks of one document read at the same time
+
+
+def _fill_group_headings(items: list, boundaries: list[int], keys: list[str]) -> None:
+    """After chunks were read independently, rows at the top of a chunk may lack the group value (e.g. a region
+    name) because its heading was printed on an earlier page. Carry the previous row's value down into those leading
+    empty cells, but only for fields that behave like group headings: few distinct values compared with the rows."""
+    if not items or not boundaries:
+        return
+    for k in keys:
+        values = [r.get(k) for r in items if r.get(k) not in (None, "")]
+        if not values or len(set(map(str, values))) > max(2, len(items) // 10):
+            continue
+        for b in boundaries:
+            if b <= 0 or b >= len(items) or items[b - 1].get(k) in (None, ""):
+                continue
+            end = min([x for x in boundaries if x > b] + [len(items)])
+            i = b
+            while i < end and items[i].get(k) in (None, ""):
+                items[i][k] = items[b - 1][k]
+                i += 1
+
+
+def extract(doc: dict, template: dict, pages: list[int], parallel: bool = True) -> dict:
     settings = db.get_settings()
     provider, model = llm.resolve(template.get("provider"), template.get("model") or None)
     vision = llm.supports_vision(provider, model)
@@ -222,26 +298,82 @@ def extract(doc: dict, template: dict, pages: list[int]) -> dict:
             f"This PDF is scanned (no text layer) and {provider}/{model} cannot read images; "
             "change the template's model to Claude or DeepSeek Flash"))
 
-    parts = _doc_parts(doc["stored_path"], pages, vision, settings["render_dpi"], bool(template.get("send_images")))
     instr = f"模板：{template['name']}\n请按 submit_result 的字段定义抽取数据。下面是要抽取的文档页面。"
     if template.get("instructions"):
         instr += f"\n\n额外说明：\n{template['instructions']}"
     examples = _examples(template["id"], doc.get("id"), int(settings.get("few_shot_examples", 2)))
     if examples:
-        instr += "\n\n以下是此前同一供应商文档经人工核对后的正确结果，仅用于参考字段含义和格式习惯，不要照抄其中的数值：\n"
-        instr += "\n".join(json.dumps(e, ensure_ascii=False) for e in examples)
-    # Stable per-template instructions go first and are cache-marked, so repeated documents reuse the prefix.
-    parts.insert(0, ("text", instr, "cache"))
+        # Long tables would make an example huge; a few rows show the format just as well.
+        short = [{**e, "items": (e.get("items") or [])[:EXAMPLE_ROWS]} for e in examples]
+        instr += "\n\n以下是此前同一供应商文档经人工核对后的正确结果，仅用于参考字段含义和格式习惯，不要照抄其中的数值（明细只列出前几行）：\n"
+        instr += "\n".join(json.dumps(e, ensure_ascii=False) for e in short)
+    notes_text = _correction_notes(template, doc.get("id"))
+    if notes_text:
+        instr += ("\n\n此前对同一模板的文档，AI 抽错的地方和人工更正如下。遇到相同或类似的情况时按更正后的做法处理，"
+                  "不要重犯同样的错：\n" + notes_text)
+    schema = build_schema(template)
 
-    res = llm.call_structured(provider, model, EXTRACT_SYSTEM, parts, build_schema(template), purpose="extract")
-    data = {"header": res.get("header") or {}, "items": res.get("items") or []}
-    if not template["item_fields"]:
-        data["items"] = []
+    # A long item table can exceed the model's output limit, so it is read a few pages at a time. Chunks run one
+    # after another, each told the last row of the previous one so group headings carry over a page break.
+    if template["item_fields"] and len(pages) > CHUNK_PAGES:
+        chunks = [pages[i:i + CHUNK_PAGES] for i in range(0, len(pages), CHUNK_PAGES)]
+    else:
+        chunks = [pages]
+
+    header: dict = {}
+    items: list = []
+    uncertain: list[str] = []
+    notes: list[str] = []
+
+    def read_chunk(ci: int, chunk: list[int], prev_row: dict | None) -> dict:
+        parts = _doc_parts(doc["stored_path"], chunk, vision, settings["render_dpi"], bool(template.get("send_images")))
+        # Stable per-template instructions go first and are cache-marked, so repeated documents reuse the prefix.
+        parts.insert(0, ("text", instr, "cache"))
+        if len(chunks) > 1:
+            ctx = f"这是一份长文档的第 {ci + 1}/{len(chunks)} 部分（第 {chunk[0]}–{chunk[-1]} 页）。只抽取这几页里的内容，不要重复其他页。"
+            if prev_row:
+                ctx += ("\n上一部分最后一条明细（用于延续跨页的分组标题 / 向下填充的值）：\n"
+                        + json.dumps(prev_row, ensure_ascii=False))
+            elif ci and parallel:
+                ctx += ("\n如果某些行所属的分组标题（章节名 / 区域名等）印在这几页之前、本部分里看不到，"
+                        "这些行里对应的分组字段留空，不要猜测，系统会自动从前文补上。")
+            parts.insert(1, ("text", ctx))
+        return llm.call_structured(provider, model, EXTRACT_SYSTEM, parts, schema, purpose="extract")
+
+    if parallel and len(chunks) > 1:
+        # Chunks are independent, so read several at once. A group heading printed before a chunk starts is filled
+        # in afterwards (see _fill_group_headings) instead of being handed over from the previous chunk.
+        with ThreadPoolExecutor(max_workers=min(len(chunks), MAX_PARALLEL)) as pool:
+            futures = [pool.submit(contextvars.copy_context().run, read_chunk, ci, chunk, None)
+                       for ci, chunk in enumerate(chunks)]
+            results = [f.result() for f in futures]
+    else:
+        results = None
+
+    starts: list[int] = []  # index of the first item of every chunk
+    for ci, chunk in enumerate(chunks):
+        res = results[ci] if results else read_chunk(ci, chunk, items[-1] if items else None)
+        starts.append(len(items))
+        for k, v in (res.get("header") or {}).items():
+            if header.get(k) in (None, "") and v not in (None, ""):
+                header[k] = v
+        offset = len(items)
+        items += res.get("items") or []
+        for u in res.get("uncertain", []):
+            if isinstance(u, str):
+                m = re.fullmatch(r"items\.(\d+)\.(.+)", u)
+                uncertain.append(f"items.{int(m.group(1)) + offset}.{m.group(2)}" if m and offset else u)
+        if res.get("notes"):
+            notes.append(res["notes"])
+
+    if results:
+        _fill_group_headings(items, starts[1:], [f["key"] for f in template["item_fields"]])
+    data = {"header": header, "items": items if template["item_fields"] else []}
     data = normalize(data, template)
     return {
         "data": data,
-        "uncertain": [u for u in res.get("uncertain", []) if isinstance(u, str)],
-        "notes": res.get("notes") or "",
+        "uncertain": uncertain,
+        "notes": "\n".join(dict.fromkeys(notes)),
         "model_used": f"{provider}/{model}",
     }
 
@@ -270,6 +402,13 @@ def _flat(data: dict) -> dict:
     return out
 
 
+PICK_OK_WARNINGS = 3  # a model with no errors and at most this many warnings is accepted without trying a pricier one
+
+
+def _good_enough(t: dict) -> bool:
+    return t["errors"] == 0 and t["warnings"] <= PICK_OK_WARNINGS
+
+
 def pick_model(doc: dict, template: dict) -> dict:
     """Try the cheap model first and only move to the next one if the result has problems.
 
@@ -289,12 +428,15 @@ def pick_model(doc: dict, template: dict) -> dict:
 
     tpl = {"id": -1, "instructions": "", "send_images": 0, "checks": [], "unique_field": "", "items_label": "", **template}
     pages = select_pages(doc, tpl)
+    if len(pages) > PICK_SAMPLE_PAGES:
+        # Comparing models does not need the whole document; skip the first page (often a cover) and sample the rest.
+        pages = sample_pages(pages[1:] if len(pages) > PICK_SAMPLE_PAGES + 1 else pages, PICK_SAMPLE_PAGES)
     tries: list[dict] = []
     for rank, key in enumerate(ladder):
         p = presets[key]
         t = {**tpl, "provider": p["provider"], "model": p["model"]}
         try:
-            res = extract(doc, t, pages)
+            res = extract(doc, t, pages, parallel=True)
         except llm.LLMError as e:
             tries.append({"key": key, "label": p["short"], "rank": rank, "error": e.msg})
             continue
@@ -303,7 +445,7 @@ def pick_model(doc: dict, template: dict) -> dict:
         warnings = len(issues) - errors
         tries.append({"key": key, "label": p["short"], "rank": rank, "errors": errors, "warnings": warnings,
                       "score": errors * 3 + warnings, "flat": _flat(res["data"])})
-        if tries[-1]["score"] == 0:
+        if _good_enough(tries[-1]):
             break
     ok = [x for x in tries if "score" in x]
     if not ok:
@@ -319,8 +461,9 @@ def pick_model(doc: dict, template: dict) -> dict:
         chosen, why = first, bi("最强的模型给出同样的结果，问题来自文档本身，不是模型造成的，使用最便宜的",
                                 "The strongest model gave the same result, so the problems come from the document "
                                 "itself, not the model; using the cheapest")
-    elif first["score"] == 0:
-        chosen, why = first, bi("没有发现问题", "No issues found")
+    elif _good_enough(first):
+        chosen, why = first, bi("没有发现问题" if first["score"] == 0 else "没有错误，只有少量提示",
+                                "No issues found" if first["score"] == 0 else "No errors, only a few warnings")
     else:
         chosen = min(ok, key=lambda x: (x["score"], -x["rank"]))
         why = (bi(f"{name(first, 'zh')}有问题，换用结果最好的", f"{name(first, 'en')} had issues; switched to the best result")
@@ -408,6 +551,38 @@ def _norm_value(v, ftype):
     return v.strip() if isinstance(v, str) else v
 
 
+def diff_corrections(original: dict | None, final: dict, template: dict) -> list[dict]:
+    """What a person changed in the AI result: [{path, ai, correct}] per cell. Rows are lined up with difflib, so
+    one deleted or added row does not make every row after it look changed. An added row has ai=None for every cell,
+    a deleted row correct=None."""
+    if not original:
+        return []
+    from difflib import SequenceMatcher
+
+    out: list[dict] = []
+
+    def cell(path: str, a, b) -> None:
+        if (a if a not in ("",) else None) != (b if b not in ("",) else None):
+            out.append({"path": path, "ai": a, "correct": b})
+
+    for f in template["header_fields"]:
+        k = f["key"]
+        cell(f"header.{k}", (original.get("header") or {}).get(k), (final.get("header") or {}).get(k))
+    keys = [f["key"] for f in template["item_fields"]]
+    old, new = original.get("items") or [], final.get("items") or []
+    sig = lambda rows: [json.dumps([r.get(k) for k in keys], ensure_ascii=False, default=str) for r in rows]
+    for tag, i1, i2, j1, j2 in SequenceMatcher(None, sig(old), sig(new), autojunk=False).get_opcodes():
+        if tag == "equal":
+            continue
+        for n in range(max(i2 - i1, j2 - j1)):
+            a = old[i1 + n] if i1 + n < i2 else None
+            b = new[j1 + n] if j1 + n < j2 else None
+            row_no = j1 + n if b is not None else j1
+            for k in keys:
+                cell(f"items.{row_no}.{k}", a.get(k) if a else None, b.get(k) if b else None)
+    return out
+
+
 def normalize(data: dict, template: dict) -> dict:
     hf = {f["key"]: f.get("type", "text") for f in template["header_fields"]}
     itf = {f["key"]: f.get("type", "text") for f in template["item_fields"]}
@@ -421,24 +596,41 @@ def normalize(data: dict, template: dict) -> dict:
 
 # ------------------------------------------------------------- suggestions
 
-def suggest_template(doc: dict, hint: str = "", lang: str = "zh", with_items: bool = False) -> dict:
+def suggest_template(doc: dict, hint: str = "", lang: str = "zh", with_items: bool | None = None,
+                     with_header: bool | None = None, suggest_model: str | None = None) -> dict:
     """lang is the UI language; the human-readable parts of the template (name, labels, descriptions) use it.
-    with_items: also design the item table (rows); without it the template only gets header fields."""
+    with_items: True = design the item table; False = header fields only; None = the AI decides from the document.
+    with_header: False = no header fields at all (item table only); None = the AI decides."""
     en = lang == "en"
+    want_items = with_items is not False
+    want_header = with_header is not False
     lang_name = "英文" if en else "中文"
     name_example = "United Logistics Invoice" if en else "United Logistics 发票"
     rule_example = "Only the INVOICE pages issued by MANPOWER LLC" if en else "只处理 MANPOWER LLC 开出的 INVOICE 页"
     items_example = "AWB Details" if en else "运单明细"
-    if with_items:
+    instr_lang = "英文" if en else "中文"
+    if want_items:
         items_rules = (
-            "- item_fields：明细表每一行的字段；没有明细表则为空数组。\n"
+            "- item_fields：明细表每一行的字段；没有明细表则为空数组。如果文档的主体是“每行一条记录”的表格"
+            "（明细、清单、目录、代码表），必须设计 item_fields；此时 header_fields 只放整份文档真正只出现一次的值，可以很少甚至为空，"
+            "不要把标题、页眉页脚、版本号、出版编号这类无业务价值的内容当作字段。\n"
             f"- items_label：明细表的名称，用{lang_name}（例如“{items_example}”）。\n"
             "- sum_check：如果明细金额之和应等于某个表头合计金额，填 "
             "{\"item_field\": 明细金额key, \"header_field\": 合计key}，否则 null。\n")
     else:
         items_rules = "- 不需要明细表：只设计表头字段，把明细表里的内容忽略掉（不要输出 item_fields、items_label、sum_check）。\n"
-    provider, model = llm.resolve("claude", None)
-    pages = list(range(1, min(doc["page_count"], 15) + 1))
+    if want_header:
+        header_rule = "- header_fields：表头字段（整份文档只出现一次的值），如发票号、日期、金额合计等；如果文档只有明细表、没有业务上需要的表头值，输出空数组。"
+    else:
+        header_rule = "- 不需要表头数据：header_fields 输出空数组，unique_field 留空；只设计明细字段。"
+    preset = next((p for p in model_presets() if p["key"] == suggest_model), None) if suggest_model else None
+    provider, model = (preset["provider"], preset["model"]) if preset else llm.resolve("claude", None)
+    if not doc["has_text"] and not llm.supports_vision(provider, model):
+        raise llm.LLMError(bi(f"该 PDF 是扫描件，{provider}/{model} 无法读取图片，请换一个模型来推荐字段",
+                              f"This PDF is scanned and {provider}/{model} cannot read images; choose another model to suggest fields"))
+    # A template only needs to see what the pages look like, so a long document is sampled (first, last and a few
+    # pages between) instead of read in full: much faster and cheaper, and the layout is the same on every page.
+    pages = sample_pages(list(range(1, doc["page_count"] + 1)), SUGGEST_SAMPLE_PAGES)
     # A digital document is read from its position-preserving text layer; images are only needed for scans.
     parts = _doc_parts(doc["stored_path"], pages, True, 110, send_images=not doc["has_text"])
     parts.append(("text", f"""请为这类文档设计一个数据抽取模板（模板按供应商划分：同一家供应商开出的文档使用同一个模板）。
@@ -446,11 +638,15 @@ def suggest_template(doc: dict, hint: str = "", lang: str = "zh", with_items: bo
 - name：模板名称，用“供应商名 + 文档类型”，用{lang_name}，例如 “{name_example}”。
 - keywords：2~4 个能唯一识别这家供应商文档的关键词（如供应商公司名、地址、邮箱域名），要求在文档上原样出现；不要用付款方/收货方等其他公司的名字。
 - page_rule：如果 PDF 里混有多份不同文档（如运单、证明、发票合订），用一句{lang_name}说明应该只处理哪些页（例如“{rule_example}”）；只有一份文档则留空。
-- header_fields：表头字段（整份文档只出现一次的值），如发票号、日期、金额合计等。
+{header_rule}
 {items_rules}- 字段 key 用英文 snake_case；label 用简洁{lang_name}；description 用{lang_name}说明在文档哪里、对应印刷的英文标签是什么、格式特点；example 填本文档里的实际值。
 - type 只能是 text / number / money / date / boolean。
 - unique_field：最能唯一标识这份文档的表头字段 key（通常是发票号），用于查重。
-重点关注应付账款（AP）和成本对账需要的信息：发票号、日期、金额、运单号/参考号、件数、重量等。
+- instructions：写给抽取 AI 的“额外说明”，用{instr_lang}，2~4 句，具体可执行。要写清：每一行/每条记录是什么；哪些内容要抽、哪些要忽略（页眉页脚、小计、合计行、重复表头）；
+  需要向下填充的分组标题（如表格中间出现的“1 Northeast Region”这类章节标题，要把它填进该分组下每一行对应的字段）；格式要求（如保持原文拼写、保留前导零、金额取哪一列、正负号规则）。
+先判断这份文档的真实类型再设计字段：
+- 发票 / 账单 / 运单 / 对账单：重点关注应付账款（AP）和成本对账需要的信息，如发票号、日期、金额、运单号/参考号、件数、重量等。
+- 清单 / 目录 / 代码对照表 / 报表等“每行一条记录”的文档：不要硬套发票字段。把表格的每一列做成明细字段（如代码、名称），把分组标题做成一个明细字段（每行都带上），并如实命名，不需要金额合计校验。
 {('用户补充要求：' + hint) if hint else ''}"""))
     field_schema = {
         "type": "array",
@@ -475,10 +671,11 @@ def suggest_template(doc: dict, hint: str = "", lang: str = "zh", with_items: bo
             "page_rule": {"type": "string"},
             "header_fields": field_schema,
             "unique_field": {"type": "string"},
+            "instructions": {"type": "string", "description": "写给抽取 AI 的额外说明"},
         },
-        "required": ["name", "keywords", "page_rule", "header_fields"],
+        "required": ["name", "keywords", "page_rule", "header_fields", "instructions"],
     }
-    if with_items:
+    if want_items:
         schema["properties"].update({
             "item_fields": field_schema,
             "items_label": {"type": "string", "description": f"明细表的名称，如“{items_example}”"},
@@ -491,7 +688,7 @@ def suggest_template(doc: dict, hint: str = "", lang: str = "zh", with_items: bo
     res = llm.call_structured(provider, model, "你是文档数据抽取模板设计专家。", parts, schema, max_tokens=8000,
                               purpose="suggest_template")
     checks = []
-    sc = res.get("sum_check") if with_items else None
+    sc = res.get("sum_check") if want_items else None
     if isinstance(sc, dict) and sc.get("item_field") and sc.get("header_field"):
         checks.append({"type": "sum", "item_field": sc["item_field"], "header_field": sc["header_field"],
                        "tolerance": 0.01})
@@ -499,10 +696,11 @@ def suggest_template(doc: dict, hint: str = "", lang: str = "zh", with_items: bo
         "name": res.get("name", ""),
         "keywords": res.get("keywords", []),
         "page_rule": res.get("page_rule", ""),
-        "header_fields": clean_fields(res.get("header_fields", [])),
-        "item_fields": clean_fields(res.get("item_fields", [])) if with_items else [],
-        "items_label": res.get("items_label", "") if with_items else "",
-        "unique_field": res.get("unique_field", ""),
+        "header_fields": clean_fields(res.get("header_fields", [])) if want_header else [],
+        "item_fields": clean_fields(res.get("item_fields", [])) if want_items else [],
+        "items_label": res.get("items_label", "") if want_items else "",
+        "unique_field": res.get("unique_field", "") if want_header else "",
+        "instructions": str(res.get("instructions") or "").strip(),
         "checks": checks,
     }
 
