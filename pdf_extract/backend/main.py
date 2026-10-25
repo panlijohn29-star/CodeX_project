@@ -1,5 +1,7 @@
 import json
 import re
+import threading
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote
@@ -302,10 +304,37 @@ def test_template(req: TestReq):
 
 # ------------------------------------------------------------- quick extract
 
+def _run_quick(run_id: int, tpl: dict) -> None:
+    """Background worker: runs the extraction on a temporary document row and stores the outcome on the run."""
+    run = db.get("quick_runs", run_id)
+    did = None
+    t0 = time.perf_counter()
+    try:
+        info = pdf_utils.inspect(run["stored_path"])
+        did = db.insert("documents", {"filename": run["filename"], "stored_path": run["stored_path"],
+                                      "page_count": info["page_count"], "has_text": int(info["has_text"]),
+                                      "status": "quick"})
+        doc = db.get("documents", did)
+        with llm.usage_scope(None, "quick_extract"):
+            pages = extractor.select_pages(doc, tpl)
+            res = extractor.extract(doc, tpl, pages)
+        res["pages"] = pages
+        res["issues"] = validate.validate(did, tpl, res["data"], res["uncertain"])
+        db.update("quick_runs", run_id, {"status": "done", "result": res, "error": "",
+                                         "duration_ms": round((time.perf_counter() - t0) * 1000)})
+    except llm.LLMError as e:
+        db.update("quick_runs", run_id, {"status": "error", "error": i18n.enc(e.msg)})
+    except Exception as e:  # never leave a run "running" forever
+        db.update("quick_runs", run_id, {"status": "error", "error": str(e)})
+    finally:
+        if did:
+            db.delete("documents", did)
+
+
 @app.post("/api/quick-extract")
 def quick_extract(file: UploadFile = File(...), header_fields: str = Form("[]"), item_fields: str = Form("[]"),
                   instructions: str = Form(""), provider: str = Form("default"), model: str = Form("")):
-    """One-off extraction without a template: the file and the result are not kept."""
+    """Start an extraction without a template. It runs in the background and is kept under /api/quick-runs."""
     try:
         h, i = json.loads(header_fields), json.loads(item_fields)
     except ValueError:
@@ -320,32 +349,57 @@ def quick_extract(file: UploadFile = File(...), header_fields: str = Form("[]"),
     it = converted[0]
     path = config.UPLOAD_DIR / f"quick_{datetime.now().strftime('%Y%m%d%H%M%S%f')}.pdf"
     path.write_bytes(it.pdf)
-    did = None
     try:
-        info = pdf_utils.inspect(str(path))
-        did = db.insert("documents", {"filename": it.filename, "stored_path": str(path), "page_count": info["page_count"],
-                                      "has_text": int(info["has_text"]), "file_hash": it.digest, "status": "quick"})
-        doc = db.get("documents", did)
-        tpl = {"id": -1, "name": it.filename, "keywords": [], "page_rule": "", "provider": provider or "default",
-               "model": model, "instructions": instructions.strip(), "send_images": False, "header_fields": h, "item_fields": i,
-               "items_label": "", "unique_field": "", "checks": []}
-        with llm.usage_scope(None, "quick_extract"):  # the document is deleted afterwards, so no doc_id
-            pages = extractor.select_pages(doc, tpl)
-            res = extractor.extract(doc, tpl, pages)
-        res["pages"] = pages
-        res["issues"] = validate.validate(did, tpl, res["data"], res["uncertain"])
-        res["header_fields"], res["item_fields"] = h, i
-        return res
-    except llm.LLMError as e:
-        raise HTTPException(400, e.msg)
-    finally:
-        if did:
-            db.delete("documents", did)
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        pages = pdf_utils.inspect(str(path))["page_count"]
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise HTTPException(400, bi(f"无法打开 PDF：{it.filename}", f"Cannot open PDF: {it.filename}"))
+    run_id = db.insert("quick_runs", {"filename": it.filename, "stored_path": str(path), "page_count": pages,
+                                      "header_fields": h, "item_fields": i, "instructions": instructions.strip(),
+                                      "provider": provider or "default", "model": model})
+    tpl = {"id": -1, "name": it.filename, "keywords": [], "page_rule": "", "provider": provider or "default",
+           "model": model, "instructions": instructions.strip(), "send_images": False, "header_fields": h,
+           "item_fields": i, "items_label": "", "unique_field": "", "checks": []}
+    threading.Thread(target=_run_quick, args=(run_id, tpl), daemon=True).start()
+    return {"id": run_id}
 
+
+def _quick_summary(r: dict) -> dict:
+    res = r.get("result") or {}
+    return {"id": r["id"], "filename": r["filename"], "page_count": r["page_count"], "status": r["status"],
+            "error": r["error"], "model": (res.get("model_used") or r["model"] or ""), "duration_ms": r["duration_ms"],
+            "created_at": r["created_at"], "rows": len((res.get("data") or {}).get("items") or []),
+            "fields": [f["label"] for f in r["header_fields"] + r["item_fields"]]}
+
+
+@app.get("/api/quick-runs")
+def list_quick_runs():
+    return [_quick_summary(r) for r in db.list_rows("quick_runs")]
+
+
+@app.get("/api/quick-runs/{rid}")
+def get_quick_run(rid: int):
+    r = _404(db.get("quick_runs", rid), bi("快速抽取记录", "Quick extraction"))
+    r.pop("stored_path", None)
+    return r
+
+
+@app.get("/api/quick-runs/{rid}/file")
+def get_quick_run_file(rid: int):
+    r = _404(db.get("quick_runs", rid), bi("快速抽取记录", "Quick extraction"))
+    return FileResponse(r["stored_path"], media_type="application/pdf",
+                        headers={"Content-Disposition": f"inline; filename*=UTF-8''{quote(r['filename'])}.pdf"})
+
+
+@app.delete("/api/quick-runs/{rid}")
+def delete_quick_run(rid: int):
+    r = _404(db.get("quick_runs", rid), bi("快速抽取记录", "Quick extraction"))
+    db.delete("quick_runs", rid)
+    try:
+        Path(r["stored_path"]).unlink(missing_ok=True)
+    except OSError:
+        pass
+    return {"ok": True}
 
 # ----------------------------------------------------------------- documents
 

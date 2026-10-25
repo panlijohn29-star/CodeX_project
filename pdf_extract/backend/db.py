@@ -93,6 +93,23 @@ CREATE TABLE IF NOT EXISTS output_formats (
     created_at TEXT,
     updated_at TEXT
 );
+CREATE TABLE IF NOT EXISTS quick_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    filename TEXT NOT NULL DEFAULT '',
+    stored_path TEXT NOT NULL DEFAULT '',
+    page_count INTEGER NOT NULL DEFAULT 0,
+    header_fields TEXT NOT NULL DEFAULT '[]',
+    item_fields TEXT NOT NULL DEFAULT '[]',
+    instructions TEXT NOT NULL DEFAULT '',
+    provider TEXT NOT NULL DEFAULT 'default',
+    model TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'running',
+    error TEXT NOT NULL DEFAULT '',
+    result TEXT,
+    duration_ms INTEGER,
+    created_at TEXT,
+    updated_at TEXT
+);
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -103,6 +120,7 @@ JSON_COLUMNS = {
     "templates": ["keywords", "header_fields", "item_fields", "checks"],
     "documents": ["pages", "data", "original_data", "uncertain", "issues", "timings", "corrections", "confirmed_flags"],
     "output_formats": ["columns", "mappings", "allocate"],
+    "quick_runs": ["header_fields", "item_fields", "result"],
 }
 
 
@@ -143,6 +161,12 @@ def init_db() -> None:
             (i18n.enc(i18n.bi("处理被中断（服务重启），请重新抽取",
                               "Processing was interrupted (server restarted); please extract again")),),
         )
+        conn.execute(
+            "UPDATE quick_runs SET status='error', error=? WHERE status='running'",
+            (i18n.enc(i18n.bi("处理被中断（服务重启），请重新解析",
+                              "Processing was interrupted (server restarted); please extract again")),),
+        )
+        conn.execute("DELETE FROM documents WHERE status='quick'")
 
 
 def _assign_legacy_batches(conn: sqlite3.Connection) -> None:
