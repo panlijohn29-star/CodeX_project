@@ -124,7 +124,8 @@ def _reuse(doc: dict, src: dict, stamp: str) -> bool:
         "status": "done", "template_id": src["template_id"], "template_locked": src["template_locked"],
         "match_info": i18n.enc(note), "pages": src["pages"], "data": src["data"],
         "original_data": src["original_data"] or src["data"], "uncertain": src["uncertain"], "issues": issues,
-        "notes": src["notes"], "model_used": src["model_used"], "verified": 0, "error": "",
+        "notes": src["notes"], "corrections": [], "confirmed_flags": [],
+        "model_used": src["model_used"], "verified": 0, "error": "",
         "exported_at": None, "template_stamp": stamp,
     })
     return True
@@ -172,6 +173,7 @@ def _process(doc_id: int, template_id: int | None = None, reuse: bool = False) -
         db.update("documents", doc_id, {
             "status": "done", "pages": pages, "data": res["data"], "original_data": res["data"],
             "uncertain": res["uncertain"], "issues": issues, "notes": res["notes"],
+            "corrections": [], "confirmed_flags": [],
             "model_used": res["model_used"], "verified": 0, "error": "",
             "exported_at": None, "template_stamp": stamp,
         })

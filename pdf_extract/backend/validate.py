@@ -30,8 +30,54 @@ def _check_value(path: str, label: dict, f: dict, v, issues: list) -> None:
                        "msg": bi(f"“{lz}”在原件中被截断：{v}", f'"{le}" is cut off in the original: {v}')})
 
 
+def confidence(doc: dict, template: dict | None) -> dict | None:
+    """0-100 confidence score of an extraction, from its rule checks and how complete the data is.
+    A human-verified result is 100. Returns {score, level: high|medium|low, reasons: [{zh, en}]}."""
+    data = doc.get("data")
+    if not template or not data or doc.get("status") != "done":
+        return None
+    if doc.get("verified"):
+        return {"score": 100, "level": "high", "reasons": [bi("已人工核对", "Verified by a person")]}
+    issues = doc.get("issues") or []
+    score, reasons = 100.0, []
+
+    errors = [i for i in issues if i["level"] == "error"]
+    warnings = [i for i in issues if i["level"] == "warning"]
+    # In a long item table a few flagged rows say little about the whole, so the penalty follows the share of rows
+    # that are flagged (at least a small fixed amount, so any flag still shows). Short documents count each issue.
+    rows = len((data.get("items") or []))
+    long_table = rows > 10
+    if errors:
+        score -= min(60, max(10, 500 * len(errors) / rows)) if long_table else min(60, 20 * len(errors))
+        reasons.append(bi(f"{len(errors)} 个错误（必填为空 / 数值无效）", f"{len(errors)} error(s) (empty required / invalid value)"))
+    if warnings:
+        score -= min(30, max(2, 300 * len(warnings) / rows)) if long_table else min(30, 7 * len(warnings))
+        reasons.append(bi(f"{len(warnings)} 个提示（不确定 / 合计不符 / 重复等）"
+                          + (f"，共 {rows} 行" if long_table else ""),
+                          f"{len(warnings)} warning(s) (uncertain / sum mismatch / duplicate…)"
+                          + (f", out of {rows} rows" if long_table else "")))
+
+    header = data.get("header") or {}
+    fields = template["header_fields"]
+    if fields:
+        empty = sum(1 for f in fields if _is_empty(header.get(f["key"])))
+        if empty and not errors:  # empty required fields are already counted as errors
+            score -= 10 * empty / len(fields)
+            reasons.append(bi(f"{empty} 个表头字段为空", f"{empty} header field(s) empty"))
+    if template["item_fields"] and not data.get("items"):
+        score -= 10
+    if not doc.get("has_text"):
+        score -= 5
+        reasons.append(bi("扫描件，靠图片识别", "Scanned document, read from images"))
+    if any(c.get("type") == "sum" for c in template.get("checks", [])) and not any(i["path"].startswith("header.") and "≠" in str(i["msg"]) for i in issues):
+        reasons.append(bi("明细合计与表头一致", "Item sum matches the header total"))
+
+    score = max(0, min(100, round(score)))
+    return {"score": score, "level": "high" if score >= 90 else "medium" if score >= 70 else "low", "reasons": reasons}
+
+
 def validate(doc_id: int | None, template: dict, data: dict, uncertain: list[str],
-             check_duplicates: bool = True) -> list[dict]:
+             check_duplicates: bool = True, others: list[dict] | None = None) -> list[dict]:
     issues: list[dict] = []
     header = data.get("header", {})
     items = data.get("items", [])
@@ -68,8 +114,11 @@ def validate(doc_id: int | None, template: dict, data: dict, uncertain: list[str
     uf = template.get("unique_field")
     if check_duplicates and uf and not _is_empty(header.get(uf)):
         val = str(header.get(uf)).strip()
-        for other in db.list_rows("documents", "template_id=? AND id!=? AND data IS NOT NULL",
-                                  (template["id"], doc_id or -1)):
+        pool = others if others is not None else db.list_rows(
+            "documents", "template_id=? AND id!=? AND data IS NOT NULL", (template["id"], doc_id or -1))
+        for other in pool:
+            if other["id"] == doc_id:
+                continue
             ov = (other.get("data") or {}).get("header", {}).get(uf)
             if ov is not None and str(ov).strip() == val:
                 ul = labels.get(uf, uf)

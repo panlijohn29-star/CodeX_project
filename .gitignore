@@ -41,3 +41,4 @@ temp/
 # Local tooling artifacts
 .openchamber/
 .impeccable/
+.archify/
