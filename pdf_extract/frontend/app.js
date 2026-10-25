@@ -285,25 +285,54 @@ function fieldChips(list) {
   return el("div", {}, tags, el("div", { class: "row", style: "margin-top:8px" }, input, el("button", { onclick: add }, T("+ 添加", "+ Add"))));
 }
 
-const quickState = { file: null, withHeader: true, withItems: true, header: [], items: [], instructions: "", result: null, modelKey: "default" };
+const quickState = { file: null, withHeader: true, withItems: true, header: [], items: [], instructions: "", run: null, modelKey: "default" };
 
 async function viewQuick() {
   const s = quickState;
-  const cfg = await api("GET", "/api/settings");
+  const [cfg, first] = await Promise.all([api("GET", "/api/settings"), api("GET", "/api/quick-runs")]);
   const presets = cfg.model_presets || [];
+  let history = first;
+  let signature = "";
+
+  const sig = () => JSON.stringify([history.map((h) => [h.id, h.status]), s.run && [s.run.id, s.run.status]]);
+  const refresh = async () => {
+    history = await api("GET", "/api/quick-runs");
+    if (s.run && s.run.status === "running") s.run = await api("GET", `/api/quick-runs/${s.run.id}`);
+    if (sig() !== signature) draw();
+    clearTimeout(pollTimer);
+    if (location.hash === "#/quick" && history.some((h) => h.status === "running")) pollTimer = setTimeout(refresh, 2000);
+  };
+
+  const openRun = async (id) => {
+    s.run = await api("GET", `/api/quick-runs/${id}`);
+    s.file = null;
+    s.header = s.run.header_fields.map((f) => ({ ...f }));
+    s.items = s.run.item_fields.map((f) => ({ ...f }));
+    s.withHeader = s.header.length > 0;
+    s.withItems = s.items.length > 0;
+    s.instructions = s.run.instructions || "";
+    const p = presets.find((x) => x.provider === s.run.provider && x.model === s.run.model);
+    s.modelKey = p ? p.key : "default";
+    draw();
+    refresh();
+  };
+
   const draw = () => {
-    const fileLabel = el("span", { class: "small muted" }, s.file ? s.file.name : T("尚未选择文件", "No file chosen"));
+    signature = sig();
+    const fileLabel = el("span", { class: "small muted" }, s.file ? s.file.name : s.run ? s.run.filename : T("尚未选择文件", "No file chosen"));
+    const choose = (f) => { s.file = f || null; s.run = null; draw(); };
     const picker = el("input", { type: "file", accept: ".pdf,.jpg,.jpeg,.png,.webp,.bmp,.gif,.tif,.tiff,.eml,.msg,.xlsx,.xlsm,.csv", style: "display:none",
-      onchange: (e) => { s.file = e.target.files[0] || null; s.result = null; draw(); } });
+      onchange: (e) => choose(e.target.files[0]) });
     const drop = el("div", { class: "dropzone", onclick: () => picker.click() },
       el("b", {}, T("点击或拖入文件", "Click or drop a file")), el("div", { class: "small" }, fileLabel));
     drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
     drop.addEventListener("dragleave", () => drop.classList.remove("over"));
-    drop.addEventListener("drop", (e) => { e.preventDefault(); s.file = e.dataTransfer.files[0] || null; s.result = null; draw(); });
+    drop.addEventListener("drop", (e) => { e.preventDefault(); choose(e.dataTransfer.files[0]); });
 
     const section = (title, list) => el("div", { style: "margin-top:12px" }, el("b", {}, title), fieldChips(list));
+    const runBtn = el("button", { class: "primary", onclick: () => guarded(runBtn, run) }, T("▶ 解析", "▶ Extract"));
     const run = async () => {
-      if (!s.file) return toast(pick("请先选择文件", "Choose a file first"), true);
+      if (!s.file) return toast(pick("请先选择文件（要重新解析历史记录，请重新选择该文件）", "Choose a file first (to re-run a past one, choose its file again)"), true);
       const h = s.withHeader ? s.header : [], i = s.withItems ? s.items : [];
       if (!h.length && !i.length) return toast(pick("请至少添加一个字段", "Add at least one field"), true);
       const fd = new FormData();
@@ -313,32 +342,74 @@ async function viewQuick() {
       fd.append("instructions", s.instructions);
       const p = presets.find((x) => x.key === s.modelKey);
       if (p) { fd.append("provider", p.provider); fd.append("model", p.model); }
-      try {
-        s.result = await withOverlay("正在解析…", "Extracting…", () => api("POST", "/api/quick-extract", fd));
-        draw();
-      } catch (e) { toast(e.message, true); }
+      const { id } = await api("POST", "/api/quick-extract", fd);
+      s.file = null;
+      s.run = await api("GET", `/api/quick-runs/${id}`);
+      history = await api("GET", "/api/quick-runs");
+      draw();
+      refresh();
     };
 
-    const r = s.result;
-    const resultPanel = r ? el("div", { class: "panel", style: "border-color:#93c5fd" },
-      el("div", { class: "row", style: "margin-bottom:8px" },
-        el("h3", { style: "margin:0" }, T("解析结果 ", "Result "),
-          el("span", { class: "small muted" }, L(() => pick("页码 ", "Pages ") + `${r.pages.join(", ")} · ${r.model_used}`))),
-        el("span", { class: "spacer" }),
-        el("button", { class: "primary", onclick: () => resultCsv(r.header_fields, r.item_fields, r.data, s.file.name.replace(/\.[^.]+$/, "")) },
-          T("⬇ 下载 CSV", "⬇ Download CSV"))),
-      r.issues.length ? el("ul", { class: "issues" }, r.issues.map((x) => el("li", { class: x.level }, L(() => loc(x.msg))))) : null,
-      r.notes ? el("div", { class: "small muted" }, T("AI 备注：", "AI notes: "), r.notes) : null,
-      r.header_fields.length ? el("table", { style: "margin-top:8px" }, el("tbody", {}, r.header_fields.map((f) =>
-        el("tr", {}, el("th", { style: "width:180px" }, f.label), el("td", {}, fmtVal(r.data.header[f.key])))))) : null,
-      r.data.items.length ? el("div", { class: "table-wrap", style: "margin-top:10px" }, el("table", {},
-        el("thead", {}, el("tr", {}, r.item_fields.map((f) => el("th", {}, f.label)))),
-        el("tbody", {}, r.data.items.map((row) => el("tr", {}, r.item_fields.map((f) => el("td", {}, fmtVal(row[f.key])))))))) : null) : null;
+    const run0 = s.run;
+    let resultPanel = null;
+    if (run0 && run0.status === "running") {
+      resultPanel = el("div", { class: "panel", style: "border-color:#93c5fd" },
+        el("b", {}, T("⏳ 正在解析…", "⏳ Extracting…")),
+        el("div", { class: "small muted" }, T("可以离开这个页面，结果会保存在下方的历史记录里。", "You can leave this page; the result will be kept in the history below.")));
+    } else if (run0 && run0.status === "error") {
+      resultPanel = el("div", { class: "panel", style: "border-color:#fca5a5" },
+        el("b", {}, T("解析失败", "Extraction failed")), el("div", {}, L(() => loc(run0.error))));
+    } else if (run0 && run0.result) {
+      const r = run0.result, hf = run0.header_fields, itf = run0.item_fields;
+      resultPanel = el("div", { class: "panel", style: "border-color:#93c5fd" },
+        el("div", { class: "row", style: "margin-bottom:8px" },
+          el("h3", { style: "margin:0" }, T("解析结果 ", "Result "),
+            el("span", { class: "small muted" }, L(() => pick("页码 ", "Pages ") + `${r.pages.join(", ")} · ${r.model_used}`))),
+          el("span", { class: "spacer" }),
+          el("button", { class: "primary", onclick: () => resultCsv(hf, itf, r.data, run0.filename.replace(/\.[^.]+$/, "")) },
+            T("⬇ 下载 CSV", "⬇ Download CSV"))),
+        r.issues.length ? el("ul", { class: "issues" }, r.issues.map((x) => el("li", { class: x.level }, L(() => loc(x.msg))))) : null,
+        r.notes ? el("div", { class: "small muted" }, T("AI 备注：", "AI notes: "), r.notes) : null,
+        hf.length ? el("table", { style: "margin-top:8px" }, el("tbody", {}, hf.map((f) =>
+          el("tr", {}, el("th", { style: "width:180px" }, f.label), el("td", {}, fmtVal((r.data.header || {})[f.key])))))) : null,
+        r.data.items.length ? el("div", { class: "table-wrap", style: "margin-top:10px" }, el("table", {},
+          el("thead", {}, el("tr", {}, itf.map((f) => el("th", {}, f.label)))),
+          el("tbody", {}, r.data.items.map((row) => el("tr", {}, itf.map((f) => el("td", {}, fmtVal(row[f.key])))))))) : null);
+    }
+
+    const statusBadge = (h) => el("span", { class: "badge " + (h.status === "done" ? "done" : h.status === "error" ? "error" : "busy") },
+      h.status === "done" ? T("完成", "Done") : h.status === "error" ? T("失败", "Failed") : T("解析中", "Running"));
+    const historyPanel = el("div", { class: "panel" },
+      el("h3", { style: "margin:0 0 8px" }, T("历史记录", "History")),
+      history.length ? el("div", { class: "table-wrap" }, el("table", {},
+        el("thead", {}, el("tr", {}, ["时间|Time", "文件|File", "字段|Fields", "行数|Rows", "模型|Model", "耗时|Time taken", "状态|Status", ""].map((h) =>
+          el("th", {}, h ? T(...h.split("|")) : "")))),
+        el("tbody", {}, history.map((h) => el("tr", { class: "clickable" + (s.run && s.run.id === h.id ? " selected" : ""), style: "cursor:pointer",
+          onclick: () => openRun(h.id) },
+          el("td", { class: "small" }, h.created_at.replace("T", " ")),
+          el("td", {}, h.filename),
+          el("td", { class: "small muted" }, h.fields.join(", ")),
+          el("td", { class: "num" }, h.rows || ""),
+          el("td", { class: "small" }, h.model.replace(/^[^/]*\//, "")),
+          el("td", { class: "small" }, h.duration_ms ? fmtDuration(h.duration_ms) : ""),
+          el("td", {}, statusBadge(h)),
+          el("td", {}, el("button", { class: "link danger", title: T("删除", "Delete"), onclick: async (e) => {
+            e.stopPropagation();
+            if (!confirm(pick("删除这条记录和上传的文件？", "Delete this record and its uploaded file?"))) return;
+            await api("DELETE", `/api/quick-runs/${h.id}`);
+            if (s.run && s.run.id === h.id) s.run = null;
+            history = await api("GET", "/api/quick-runs");
+            draw();
+          } }, "✕")))))))
+        : el("div", { class: "muted small" }, T("还没有记录", "No runs yet")));
 
     const formPanel = el("div", { class: "panel" },
-      el("h2", { style: "margin-top:0" }, T("快速抽取（无需模板）", "Quick extract (no template)")),
-      el("div", { class: "muted small", style: "margin-bottom:10px" },
-        T("上传一份文件，输入想要的字段名，直接解析并下载 CSV。文件和结果不会保存。", "Upload a file, type the field names you want, extract and download a CSV. Nothing is stored.")),
+      el("div", { class: "row" }, el("h2", { style: "margin:0" }, T("快速抽取（无需模板）", "Quick extract (no template)")),
+        el("span", { class: "spacer" }),
+        s.run ? el("button", { onclick: () => { s.run = null; s.file = null; draw(); } }, T("＋ 新建", "+ New")) : null),
+      el("div", { class: "muted small", style: "margin:6px 0 10px" },
+        T("上传一份文件，输入想要的字段名，直接解析并下载 CSV。每次解析会保存在下方历史记录里，随时可以回看。",
+          "Upload a file, type the field names you want, extract and download a CSV. Every run is kept in the history below.")),
       drop, picker,
       el("label", { class: "field", style: "margin-top:12px" }, T("抽取模型", "Extraction model"),
         el("select", { onchange: (e) => (s.modelKey = e.target.value) },
@@ -352,26 +423,29 @@ async function viewQuick() {
       el("div", { style: "margin-top:12px" }, el("div", { class: "small muted" }, T("补充说明（可选）", "Extra instructions (optional)")),
         el("textarea", { rows: 2, value: s.instructions, oninput: (e) => (s.instructions = e.target.value),
           placeholder: T("例如：金额为空的行留空", "e.g. leave rows with an empty amount empty") })),
-      el("div", { style: "margin-top:12px" }, el("button", { class: "primary", onclick: run }, T("▶ 解析", "▶ Extract"))));
+      el("div", { style: "margin-top:12px" }, runBtn));
 
+    const previewSrc = s.run ? `${BASE}/api/quick-runs/${s.run.id}/file` : "";
     if (s.previewFor !== s.file) {
       if (s.previewUrl) URL.revokeObjectURL(s.previewUrl);
       s.previewFor = s.file;
       s.previewUrl = s.file && /\.(pdf|jpe?g|png|webp|gif|bmp)$/i.test(s.file.name) ? URL.createObjectURL(s.file) : "";
     }
-    const preview = s.previewUrl
-      ? el("iframe", { class: "pdf-frame", src: /\.pdf$/i.test(s.file.name) ? `${s.previewUrl}#navpanes=0&view=FitH` : s.previewUrl })
-      : el("div", { class: "panel muted", style: "text-align:center;padding:40px" },
-          s.file ? T("此文件类型无法预览（解析后仍可正常抽取）", "This file type cannot be previewed (extraction still works)")
-                 : T("选择文件后在这里预览", "The file is previewed here once chosen"));
+    const preview = previewSrc
+      ? el("iframe", { class: "pdf-frame", src: `${previewSrc}#navpanes=0&view=FitH` })
+      : s.previewUrl
+        ? el("iframe", { class: "pdf-frame", src: /\.pdf$/i.test(s.file.name) ? `${s.previewUrl}#navpanes=0&view=FitH` : s.previewUrl })
+        : el("div", { class: "panel muted", style: "text-align:center;padding:40px" },
+            s.file ? T("此文件类型无法预览（解析后仍可正常抽取）", "This file type cannot be previewed (extraction still works)")
+                   : T("选择文件后在这里预览", "The file is previewed here once chosen"));
 
     $app.replaceChildren(el("div", { class: "split" },
       el("div", { class: "left" }, preview),
-      el("div", { class: "right" }, formPanel, resultPanel)));
+      el("div", { class: "right" }, formPanel, resultPanel, historyPanel)));
   };
   draw();
+  if (history.some((h) => h.status === "running")) pollTimer = setTimeout(refresh, 2000);
 }
-
 // ------------------------------------------------------------------- router
 function route() {
   clearTimeout(pollTimer);
