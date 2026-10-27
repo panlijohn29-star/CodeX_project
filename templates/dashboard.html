@@ -314,7 +314,7 @@
               <strong>${escapeHtml(user.user_id)}</strong>
               <div class="meta">${enabledLabel} · ${escapeHtml(user.role_name || 'No role — no feature access')}</div>
             </div>
-            <div class="account-actions">${toggleButton} ${isAdmin && user.user_id !== 'admin' ? `<select class="account-role" data-user-id="${escapeHtml(user.user_id)}"><option value="">No role</option>${roles.map(role => `<option value="${escapeHtml(role.id)}" ${user.role_id === role.id ? 'selected' : ''}>${escapeHtml(role.name)}</option>`).join('')}</select>` : ''}</div>
+            <div class="account-actions">${toggleButton} ${isAdmin && user.user_id !== 'admin' ? `<button type="button" class="secondary" data-reset-user="${escapeHtml(user.user_id)}">Reset password</button><button type="button" class="secondary" data-remove-user="${escapeHtml(user.user_id)}">Remove</button><select class="account-role" data-user-id="${escapeHtml(user.user_id)}"><option value="">No role</option>${roles.map(role => `<option value="${escapeHtml(role.id)}" ${user.role_id === role.id ? 'selected' : ''}>${escapeHtml(role.name)}</option>`).join('')}</select>` : ''}</div>
           </div>
         `;
       }).join("");
@@ -337,6 +337,30 @@
             authUsers = payload.users;
             accountState.textContent = `Updated account ${userId}`;
             renderAccounts();
+          });
+        });
+        const postAccount = async (path, body, done) => {
+          const response = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+          const payload = await response.json();
+          if (!response.ok) { accountState.textContent = payload.error || "Unable to update account"; return; }
+          authUsers = payload.users;
+          accountState.textContent = done;
+          renderAccounts();
+        };
+        accountList.querySelectorAll("button[data-reset-user]").forEach((button) => {
+          button.addEventListener("click", () => {
+            const userId = button.getAttribute("data-reset-user");
+            const newPassword = window.prompt(`New password for ${userId}:`);
+            if (newPassword === null) return;
+            if (!newPassword.trim()) { accountState.textContent = "New password cannot be empty"; return; }
+            postAccount("/api/account/reset-password", { user_id: userId, new_password: newPassword }, `Password reset for ${userId}`);
+          });
+        });
+        accountList.querySelectorAll("button[data-remove-user]").forEach((button) => {
+          button.addEventListener("click", () => {
+            const userId = button.getAttribute("data-remove-user");
+            if (!window.confirm(`Remove account ${userId}? This cannot be undone.`)) return;
+            postAccount("/api/account/delete", { user_id: userId }, `Removed account ${userId}`);
           });
         });
         accountList.querySelectorAll(".account-role").forEach((select) => {
