@@ -983,6 +983,11 @@ def can_access_run(run_info):
 def require_login(view_func):
     @wraps(view_func)
     def wrapper(*args, **kwargs):
+        if session.get("authenticated") and session.get("password_checked"):
+            # A removed account loses its open sessions; the password check marker is set only by a real sign-in.
+            account = get_auth_user(session.get("user_id", ""))
+            if account is None:
+                session.clear()
         if not session.get("authenticated"):
             if request.path.startswith("/api/"):
                 return jsonify({"error": "Unauthorized"}), 401
@@ -1010,6 +1015,7 @@ def login():
         if auth_user and auth_user["enabled"] and check_password_hash(auth_user["password_hash"], password):
             session["authenticated"] = True
             session["user_id"] = user_id
+            session["password_checked"] = True
             return redirect(url_for("index_v4"))
         error = "Invalid ID or password"
     return render_template("login_v4.html", error=error)
@@ -1432,6 +1438,42 @@ def toggle_account():
             return jsonify({"ok": True, "users": [public_auth_user(item) for item in users]})
 
     return jsonify({"error": "User not found"}), 404
+
+
+@app.post("/api/account/reset-password")
+@require_login
+def reset_account_password():
+    if not is_admin_user():
+        abort(404)
+    payload = request.get_json(silent=True) or {}
+    user_id = str(payload.get("user_id", "")).strip()
+    new_password = payload.get("new_password", "")
+    if not isinstance(new_password, str) or not new_password.strip():
+        return jsonify({"error": "New password cannot be empty"}), 400
+    users = load_auth_users()
+    for user in users:
+        if user["user_id"] == user_id:
+            user["password_hash"] = generate_password_hash(new_password)
+            save_auth_users(users)
+            return jsonify({"ok": True, "users": [public_auth_user(item) for item in users]})
+    return jsonify({"error": "User not found"}), 404
+
+
+@app.post("/api/account/delete")
+@require_login
+def delete_account():
+    if not is_admin_user():
+        abort(404)
+    payload = request.get_json(silent=True) or {}
+    user_id = str(payload.get("user_id", "")).strip()
+    if user_id == ADMIN_USER_ID:
+        return jsonify({"error": "Admin account cannot be removed"}), 400
+    users = load_auth_users()
+    remaining = [user for user in users if user["user_id"] != user_id]
+    if len(remaining) == len(users):
+        return jsonify({"error": "User not found"}), 404
+    save_auth_users(remaining)
+    return jsonify({"ok": True, "users": [public_auth_user(item) for item in remaining]})
 
 
 @app.post("/api/account/role")

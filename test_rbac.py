@@ -82,6 +82,33 @@ class RbacPlatformTests(unittest.TestCase):
         self.assertEqual(worker.get("/features/closing_report").status_code, 404)
         self.assertEqual(worker.post("/api/runs", json={"feature_id": "closing_report", "inputs": {}}).status_code, 404)
 
+    def test_admin_can_reset_passwords_and_remove_accounts(self):
+        admin = self.platform.app.test_client()
+        self.assertEqual(self.login(admin, "admin", "admin-pass").status_code, 302)
+        self.assertEqual(admin.post("/api/account", json={"user_id": "temp", "password": "old-pass"}).status_code, 200)
+        temp = self.platform.app.test_client()
+        self.assertEqual(self.login(temp, "temp", "old-pass").status_code, 302)
+
+        # Only the built-in admin may do this; others get 404, and the admin account itself is protected.
+        self.assertEqual(temp.post("/api/account/reset-password", json={"user_id": "worker", "new_password": "x"}).status_code, 404)
+        self.assertEqual(temp.post("/api/account/delete", json={"user_id": "worker"}).status_code, 404)
+        self.assertEqual(admin.post("/api/account/delete", json={"user_id": "admin"}).status_code, 400)
+        self.assertEqual(admin.post("/api/account/delete", json={"user_id": "nobody"}).status_code, 404)
+        self.assertEqual(admin.post("/api/account/reset-password", json={"user_id": "temp", "new_password": "  "}).status_code, 400)
+        self.assertEqual(admin.post("/api/account/reset-password", json={"user_id": "nobody", "new_password": "x"}).status_code, 404)
+
+        reset = admin.post("/api/account/reset-password", json={"user_id": "temp", "new_password": "new-pass"})
+        self.assertEqual(reset.status_code, 200)
+        self.assertNotIn("password_hash", reset.get_json()["users"][0])
+        self.assertEqual(self.login(self.platform.app.test_client(), "temp", "old-pass").status_code, 200)
+        self.assertEqual(self.login(self.platform.app.test_client(), "temp", "new-pass").status_code, 302)
+
+        removed = admin.post("/api/account/delete", json={"user_id": "temp"})
+        self.assertEqual(removed.status_code, 200)
+        self.assertNotIn("temp", [user["user_id"] for user in removed.get_json()["users"]])
+        self.assertEqual(self.login(self.platform.app.test_client(), "temp", "new-pass").status_code, 200)
+        # The removed user's open session stops working at once.
+        self.assertEqual(temp.get("/api/roles").status_code, 401)
     def test_admin_access_is_registry_driven_and_admin_role_is_assignable_but_immutable(self):
         admin = self.platform.app.test_client()
         self.assertEqual(self.login(admin, "admin", "admin-pass").status_code, 302)
