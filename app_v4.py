@@ -29,6 +29,7 @@ import features.eason_dfw_billing as eason_dfw_billing
 import features.eason_client_report as eason_client_report
 import features.ord_ae_closing as ord_ae_closing
 import features.ord_do_allocation as ord_do_allocation
+import features.invoice_lookup as invoice_lookup
 from features import get_feature, list_features
 import maintenance_notice
 from platform_config import env_value
@@ -830,6 +831,8 @@ FEATURE_ENDPOINTS = {
     "ord_ae_closing_export": "ord_ae_closing",
     "ord_do_allocation_generate": "ord_do_allocation",
     "ord_do_allocation_download": "ord_do_allocation",
+    "invoice_lookup_generate": "invoice_lookup",
+    "invoice_lookup_download": "invoice_lookup",
     "sql_query_start": "sql_query",
     "sql_query_status": "sql_query",
     "sql_query_cancel": "sql_query",
@@ -1944,6 +1947,7 @@ def ord_do_allocation_generate():
     try:
         return jsonify(ord_do_allocation.generate_payload(
             request.files.get("raw_workbook"), request.files.get("carrier_workbook"),
+            request.form.get("language", "zh"),
         ))
     except (ValueError, ord_do_allocation.ConverterError) as exc:
         return jsonify({"error": str(exc)}), 400
@@ -1959,6 +1963,34 @@ def ord_do_allocation_download(filename):
     if not path or not path.is_file():
         abort(404)
     return send_file(path, as_attachment=True, download_name=path.name,
+                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+@app.post("/api/invoice-lookup/generate")
+@require_login
+@require_feature_access("invoice_lookup")
+def invoice_lookup_generate():
+    try:
+        return jsonify(invoice_lookup.generate_payload(
+            request.files.get("raw_workbook"), request.form.get("since"), request.form.get("sheet"),
+        ))
+    except invoice_lookup.SheetChoiceRequired as exc:
+        return jsonify({"error": str(exc), "sheets": exc.sheets}), 400
+    except (ValueError, invoice_lookup.LookupError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception:
+        app.logger.exception("Invoice Lookup failed")
+        return jsonify({"error": "处理发生意外错误；未生成有效结果。"}), 500
+
+
+@app.get("/download/invoice-lookup/<filename>")
+@require_login
+@require_feature_access("invoice_lookup")
+def invoice_lookup_download(filename):
+    path = invoice_lookup.output_path_for(filename)
+    if not path or not path.is_file():
+        abort(404)
+    return send_file(path, as_attachment=True, download_name=re.sub(r"^[0-9a-f]{32}_", "", path.name),
                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 

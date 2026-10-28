@@ -3,16 +3,18 @@
 
 from __future__ import annotations
 
-import io
 import os
 import re
 import sys
+import threading
 import uuid
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
+
+from features.ord_do_allocation_language import choose, set_language, translate, validation_message
 
 try:
     import pymysql
@@ -33,12 +35,13 @@ ZERO = Decimal("0")
 DB_CHUNK_SIZE = 500
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 OUTPUT_DIR = Path(BASE_DIR) / "reports_v4" / "ord_do_allocation"
+_RUN_LOCK = threading.Lock()
 
 FEATURE = {
     "id": "ord_do_allocation",
-    "title": "ORD_DO_ALLOCATION",
+    "title": "ORD_DO_ALLOCATION_V2",
     "category": "Tools",
-    "description": "Allocate carrier PRO costs across ORD DO/IWT HBL rows and generate AP/AR upload workbooks.",
+    "description": "Allocate carrier PRO costs across ORD DO/IWT HBL rows (remark amounts and CW) and generate AP/AR upload workbooks.",
     "supports_cancel": False,
     "output_type": "interactive",
     "input_schema": [],
@@ -90,6 +93,7 @@ RAW_HEADER_ALIASES = {
     "amt": {"amt", "amount", "truckcost", "billingamount", "apamount"},
     "do": {"do", "do#", "dono", "deliveryorder", "dispatchno", "iwt", "iwt#"},
     "customer": {"customer", "customername", "rawcustomer"},
+    "remark": {"remark", "remarks", "note", "notes"},
 }
 
 OUTPUT_HEADERS = [
@@ -157,6 +161,7 @@ IWT_HEADERS = [
     "pro#",
     "Trucking company",
     "customer",
+    "Handling office",
 ]
 TMS_HEADERS = [
     "iwt",
@@ -186,6 +191,9 @@ VALIDATION_HEADERS = [
 class ConverterError(RuntimeError):
     """A fatal, user-actionable conversion error."""
 
+    def __str__(self):
+        return translate(super().__str__())
+
 
 @dataclass
 class RawRow:
@@ -194,6 +202,9 @@ class RawRow:
     pro: str
     amount: Optional[Decimal]
     raw_customer: str = ""
+    remark: str = ""
+    assigned_amount: Optional[Decimal] = None
+    remark_invalid: bool = False
 
 
 @dataclass
@@ -228,6 +239,9 @@ class CalcRow:
     customer: str = ""
     share_other_customer: str = ""
     handling_office: str = ""
+    allocation_group: str = ""
+    allocation_budget: Optional[Decimal] = None
+    allocation_invalid: bool = False
 
 
 @dataclass
@@ -269,7 +283,7 @@ class ValidationLog:
                 do_no=do_no,
                 hbl_no=hbl_no,
                 issue_type=issue_type,
-                message=message,
+                message=validation_message(issue_type, message),
                 raw_value=clean_text(raw_value),
             )
         )
@@ -289,7 +303,7 @@ def configure_console() -> None:
 
 
 def progress(message: str) -> None:
-    print(message, flush=True)
+    print(translate(message), flush=True)
 
 
 def normalize_header(value: Any) -> str:
@@ -328,6 +342,24 @@ def parse_decimal(value: Any) -> Optional[Decimal]:
 
 def money(value: Decimal) -> Decimal:
     return value.quantize(MONEY_UNIT, rounding=ROUND_HALF_UP)
+
+
+def parse_assigned_amount(remark: str, do_no: str) -> tuple[Optional[Decimal], bool]:
+    if not re.search(r"allocat", remark, re.I):
+        return None, False
+    number = r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?"
+    pattern = (
+        rf"(?:please\s+|pls\s+)?allocate\s*(?:USD\s*|\$\s*)?"
+        rf"(?P<amount>{number})\s*(?:USD\s*)?to\s+(?:this\s+do|(?P<target>DO\d+|IWT\d+))"
+        rf"(?:\s*\(\s*(?P<parenthesis>DO\d+|IWT\d+)\s*\))?\s*[.!]?"
+    )
+    match = re.fullmatch(pattern, remark.strip(), re.I)
+    if not match:
+        return None, True
+    targets = [match.group(name) for name in ("target", "parenthesis") if match.group(name)]
+    if any(target.casefold() != do_no.casefold() for target in targets):
+        return None, True
+    return Decimal(match.group("amount").replace(",", "")), False
 
 
 def raw_pro_amount_conflicts(raw_rows: Sequence[RawRow]) -> dict[str, list[RawRow]]:
@@ -455,6 +487,14 @@ def read_raw_rows(input_path: Path, validation: ValidationLog) -> list[RawRow]:
                 raw_value=amount_raw,
             )
             continue
+        remark = clean_text(ws.cell(row_number, mapping["remark"]).value) if "remark" in mapping else ""
+        assigned_amount, remark_invalid = parse_assigned_amount(remark, do_no)
+        if remark_invalid:
+            validation.add(
+                "ERROR", "Raw", "REMARK_ALLOCATION_INVALID",
+                "Allocation remark cannot be interpreted unambiguously or refers to another DO. Correct the remark before billing this PRO.",
+                row=row_number, pro=pro, do_no=do_no, raw_value=remark,
+            )
         rows.append(
             RawRow(
                 source_row=row_number,
@@ -462,6 +502,9 @@ def read_raw_rows(input_path: Path, validation: ValidationLog) -> list[RawRow]:
                 pro=pro,
                 amount=amount,
                 raw_customer=customer,
+                remark=remark,
+                assigned_amount=assigned_amount,
+                remark_invalid=remark_invalid,
             )
         )
 
@@ -585,30 +628,42 @@ def env_bool(name: str, default: bool) -> bool:
     return raw.strip().casefold() not in {"0", "false", "no", "off"}
 
 
-def load_config(env_path: Optional[Path] = None, script_dir: Optional[Path] = None) -> tuple[dict[str, Any], dict[str, Any]]:
+def load_config(env_path: Optional[Path] = None, script_dir: Optional[Path] = None) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Build XC, SC and WMS connection settings from the Platform environment.
+
+    XC and WMS use XC_DB_* / WMS_DB_*; SC uses the platform SCDBUS profile.
+    The arguments are accepted for compatibility with the standalone tool and ignored.
+    """
     if pymysql is None:
         raise ConverterError("PyMySQL is not installed. Run pip install -r requirements.txt.")
-    xc_values = {
-        "host": env_value("XC_DB_HOST", env_value("XC_HOST")),
-        "user": env_value("XC_DB_USER", env_value("XC_USER")),
-        "password": env_value("XC_DB_PASSWORD", env_value("XC_PASSWORD")),
-        "db": env_value("XC_DB_NAME", env_value("XC_DATABASE", env_value("XC_DB"))),
-    }
-    missing = [name for name, value in xc_values.items() if not value]
-    if missing:
-        raise ConverterError("XC database configuration is missing: {0}. Add XC_DB_HOST, XC_DB_PORT, XC_DB_USER, XC_DB_PASSWORD, and XC_DB_NAME to the Platform .env file.".format(", ".join(missing)))
-    xc_config = {
-        **xc_values, "port": env_int("XC_DB_PORT", env_int("XC_PORT", 3306)), "charset": env_value("XC_DB_CHARSET", "utf8mb4"),
-        "connect_timeout": env_int("DB_CONNECT_TIMEOUT", 10), "read_timeout": env_int("DB_READ_TIMEOUT", 600), "write_timeout": env_int("DB_WRITE_TIMEOUT", 600),
-    }
+
+    def dedicated(prefix: str) -> dict[str, Any]:
+        names = {"host": "HOST", "user": "USER", "password": "PASSWORD", "database": "NAME"}
+        values = {key: env_value(f"{prefix}_DB_{suffix}") for key, suffix in names.items()}
+        missing = [f"{prefix}_DB_{names[key]}" for key, value in values.items() if not value]
+        if missing:
+            raise ConverterError(
+                f"Database configuration is incomplete for {prefix}. Missing: {', '.join(missing)}."
+            )
+        try:
+            port = env_int(f"{prefix}_DB_PORT", 3306)
+        except ValueError as exc:
+            raise ConverterError(f"{prefix}_DB_PORT must be an integer.") from exc
+        config: dict[str, Any] = {**values, "port": port, "charset": env_value(f"{prefix}_DB_CHARSET", "utf8mb4")}
+        if str(env_value(f"{prefix}_DB_SSL", "false")).strip().lower() in {"1", "true", "yes", "on"}:
+            config["ssl"] = {"check_hostname": True}
+        return config
+
+    xc_config = dedicated("XC")
+    wms_config = dedicated("WMS")
     try:
         sc_config = get_db_config("scdbus")
     except RuntimeError as exc:
-        raise ConverterError("SCDBUS database configuration is incomplete: {0}".format(exc)) from exc
-    for config in (xc_config, sc_config):
-        config["cursorclass"] = pymysql.cursors.DictCursor
-        config["autocommit"] = True
-    return xc_config, sc_config
+        raise ConverterError(f"SCDBUS database configuration is incomplete: {exc}") from exc
+    for config in (xc_config, sc_config, wms_config):
+        config.update(cursorclass=pymysql.cursors.DictCursor, autocommit=True,
+                      connect_timeout=20, read_timeout=180, write_timeout=180)
+    return xc_config, sc_config, wms_config
 
 
 def fetch_all(connection_config: dict[str, Any], sql: str, params: Sequence[Any]) -> list[dict[str, Any]]:
@@ -719,49 +774,74 @@ def query_xc_dispatch_calc(xc_config: dict[str, Any], do_numbers: Sequence[str])
     return rows
 
 
-def query_xc_iwt_calc(xc_config: dict[str, Any], do_numbers: Sequence[str]) -> list[CalcRow]:
+def query_iwt_calc(wms_config: dict[str, Any], xc_config: dict[str, Any],
+                   do_numbers: Sequence[str], validation: ValidationLog) -> list[CalcRow]:
     rows: list[CalcRow] = []
+    seen = set()
     for group in chunks(do_numbers):
         placeholders = ", ".join(["%s"] * len(group))
         sql = f"""
             SELECT
                 head.iwt_no,
-                body.house_no,
-                total.chargeable_weight,
-                sum_table.do_chargeable_weight_sum
+                body.house_no
             FROM t_iwt_head head
             LEFT JOIN t_iwt_body body
                 ON body.iwt_head_id = head.id
-            LEFT JOIN t_shipment_total total
-                ON total.bussiness_no = body.house_no
-               AND total.data_type = 'H'
-            LEFT JOIN (
-                SELECT
-                    h.iwt_no,
-                    SUM(t.chargeable_weight) AS do_chargeable_weight_sum
-                FROM t_iwt_head h
-                LEFT JOIN t_iwt_body b
-                    ON b.iwt_head_id = h.id
-                LEFT JOIN t_shipment_total t
-                    ON t.bussiness_no = b.house_no
-                   AND t.data_type = 'H'
-                WHERE h.iwt_no IN ({placeholders})
-                GROUP BY h.iwt_no
-            ) sum_table
-                ON sum_table.iwt_no = head.iwt_no
             WHERE head.iwt_no IN ({placeholders})
         """
-        params = list(group) + list(group)
-        for row in fetch_all(xc_config, sql, params):
+        try:
+            records = fetch_all(wms_config, sql, group)
+        except pymysql.MySQLError as exc:
+            raise ConverterError(f"WMS database query failed: {exc}") from exc
+        for row in records:
+            do_no = clean_text(get_db_field(row, "iwt_no"))
+            hbl_no = clean_text(get_db_field(row, "house_no"))
+            key = (do_no.casefold(), hbl_no.casefold())
+            if key in seen:
+                validation.add("ERROR", "calculation", "IWT_DUPLICATE_HBL",
+                               "Repeated WMS IWT/H# relationship; included once to avoid double allocation.",
+                               do_no=do_no, hbl_no=hbl_no)
+                continue
+            seen.add(key)
             rows.append(
                 CalcRow(
-                    do_no=clean_text(get_db_field(row, "iwt_no")),
-                    hbl_no=clean_text(get_db_field(row, "house_no")),
-                    h_cw=parse_decimal(get_db_field(row, "chargeable_weight")),
-                    do_cw=parse_decimal(get_db_field(row, "do_chargeable_weight_sum")),
+                    do_no=do_no,
+                    hbl_no=hbl_no,
+                    h_cw=None,
+                    do_cw=None,
                     source_type="IWT",
                 )
             )
+    weights = defaultdict(list)
+    for group in chunks(unique_preserve(row.hbl_no for row in rows if row.hbl_no)):
+        placeholders = ", ".join(["%s"] * len(group))
+        sql = f"SELECT bussiness_no, chargeable_weight FROM t_shipment_total WHERE data_type = 'H' AND bussiness_no IN ({placeholders})"
+        try:
+            records = fetch_all(xc_config, sql, group)
+        except pymysql.MySQLError as exc:
+            raise ConverterError(f"XC database query failed: {exc}") from exc
+        for record in records:
+            weights[clean_text(get_db_field(record, "bussiness_no")).casefold()].append(
+                parse_decimal(get_db_field(record, "chargeable_weight")))
+    totals = defaultdict(lambda: ZERO)
+    for row in rows:
+        matches = weights[row.hbl_no.casefold()]
+        code = None
+        if not matches:
+            code = "IWT_CW_NOT_FOUND"
+        elif len(matches) != 1:
+            code = "IWT_CW_DUPLICATE"
+        elif matches[0] is None or not matches[0].is_finite() or matches[0] <= ZERO:
+            code = "IWT_CW_INVALID"
+        else:
+            row.h_cw = matches[0]
+            totals[row.do_no.casefold()] += row.h_cw
+        if code:
+            validation.add("ERROR", "calculation", code,
+                           "XC H# weight is missing, ambiguous or invalid; CW left blank. Review before billing.",
+                           do_no=row.do_no, hbl_no=row.hbl_no, raw_value=str(matches))
+    for row in rows:
+        row.do_cw = totals[row.do_no.casefold()]
     return rows
 
 
@@ -866,6 +946,32 @@ def query_iwt_to(xc_config: dict[str, Any], iwt_numbers: Sequence[str]) -> dict[
     return result
 
 
+def query_iwt_handling_office(xc_config: dict[str, Any], hbl_numbers: Sequence[str],
+                             validation: ValidationLog) -> dict[str, str]:
+    offices: dict[str, dict[str, str]] = defaultdict(dict)
+    for group in chunks(unique_preserve(hbl for hbl in hbl_numbers if hbl)):
+        placeholders = ", ".join(["%s"] * len(group))
+        sql = f"""
+            SELECT body.house_no, head.dest_handing_office
+            FROM t_dispatch_body body
+            LEFT JOIN t_dispatch_head head ON head.id = body.dispatch_head_id
+            WHERE body.house_no IN ({placeholders})
+        """
+        for record in fetch_all(xc_config, sql, group):
+            hbl = clean_text(get_db_field(record, "house_no"))
+            office = clean_text(get_db_field(record, "dest_handing_office"))
+            if hbl and office and office.casefold() != "apex-ord":
+                offices[hbl.casefold()].setdefault(office.casefold(), office)
+    result = {}
+    for key, values in offices.items():
+        result[key] = "; ".join(values[name] for name in sorted(values))
+        if len(values) > 1:
+            validation.add("WARNING", "IWT", "IWT_HANDLING_OFFICE_MULTIPLE",
+                           "H# maps to multiple non-ORD handling offices in XC; all are listed. Please review.",
+                           hbl_no=key, raw_value=result[key])
+    return result
+
+
 def apply_raw_mappings(calc_rows: list[CalcRow], raw_rows: Sequence[RawRow]) -> None:
     raw_by_do: dict[str, RawRow] = {}
     for raw in raw_rows:
@@ -921,7 +1027,7 @@ def enrich_from_sc_jobinfo(
         row.sc_job_no, row.customer = match
 
 
-def allocate_costs(calc_rows: list[CalcRow], validation: ValidationLog) -> None:
+def allocate_cw_costs(calc_rows: list[CalcRow], validation: ValidationLog, budget: Optional[Decimal] = None) -> None:
     by_pro: dict[str, list[CalcRow]] = defaultdict(list)
     for row in calc_rows:
         if row.pro:
@@ -929,7 +1035,7 @@ def allocate_costs(calc_rows: list[CalcRow], validation: ValidationLog) -> None:
 
     for pro_key, rows in by_pro.items():
         pro = rows[0].pro
-        amount = next((row.truck_cost for row in rows if row.truck_cost is not None), None)
+        amount = budget if budget is not None else next((row.truck_cost for row in rows if row.truck_cost is not None), None)
         if amount is None:
             validation.add(
                 "ERROR",
@@ -992,6 +1098,83 @@ def allocate_costs(calc_rows: list[CalcRow], validation: ValidationLog) -> None:
             customers_by_pro[row.pro.casefold()].add(row.customer.casefold())
     for row in calc_rows:
         row.share_other_customer = "Y" if len(customers_by_pro.get(row.pro.casefold(), set())) > 1 else "N"
+
+
+def allocate_costs(
+    calc_rows: list[CalcRow], validation: ValidationLog, raw_rows: Optional[Sequence[RawRow]] = None,
+) -> None:
+    if raw_rows is None:
+        raw_rows = list({id(row.raw_row): row.raw_row for row in calc_rows if row.raw_row}.values())
+    raw_by_pro: dict[str, list[RawRow]] = defaultdict(list)
+    calc_by_pro: dict[str, list[CalcRow]] = defaultdict(list)
+    for raw in raw_rows:
+        raw_by_pro[raw.pro.casefold()].append(raw)
+    for row in calc_rows:
+        calc_by_pro[row.pro.casefold()].append(row)
+
+    for pro_key in dict.fromkeys([*raw_by_pro, *calc_by_pro]):
+        sources = raw_by_pro.get(pro_key, [])
+        shipments = calc_by_pro.get(pro_key, [])
+        if not any(raw.assigned_amount is not None or raw.remark_invalid for raw in sources):
+            allocate_cw_costs(shipments, validation)
+            continue
+        invalid = any(raw.remark_invalid for raw in sources)
+        amounts = {money(raw.amount) for raw in sources if raw.amount is not None}
+        targets: dict[str, Decimal] = {}
+        do_keys = {raw.do_no.casefold() for raw in sources}
+        for raw in sources:
+            if raw.assigned_amount is not None:
+                do_key = raw.do_no.casefold()
+                if do_key in targets and targets[do_key] != raw.assigned_amount:
+                    invalid = True
+                targets[do_key] = raw.assigned_amount
+        fixed_total = sum(targets.values(), ZERO)
+        total = next(iter(amounts)) if len(amounts) == 1 else None
+        unfixed = do_keys - targets.keys()
+        if total is None or fixed_total > total or (not unfixed and fixed_total != total):
+            invalid = True
+        if raw_do_mapping_conflicts(sources):
+            invalid = True
+        if invalid:
+            validation.add(
+                "ERROR", "Raw", "REMARK_ALLOCATION_CONFLICT",
+                "Assigned DO amounts conflict, exceed the invoice, or leave an undistributed balance. This PRO has blank allocation amounts; correct the source and rerun.",
+                pro=sources[0].pro, raw_value=f"PRO AMT={sorted(amounts)}; assigned={targets}",
+            )
+            for row in shipments:
+                row.allocation_invalid = True
+                row.est_cost = row.actual_cost = row.do_cost = None
+            continue
+
+        pools = [(do_key, [row for row in shipments if row.do_no.casefold() == do_key], amount)
+                 for do_key, amount in targets.items()]
+        if unfixed:
+            pools.append(("REMAINDER", [row for row in shipments if row.do_no.casefold() in unfixed], total - fixed_total))
+        for pool_index, (pool_key, pool, amount) in enumerate(pools):
+            group = f"P{list(raw_by_pro).index(pro_key) + 1}G{pool_index + 1}"
+            for row in pool:
+                row.allocation_group = group
+                row.allocation_budget = amount
+            allocate_cw_costs(pool, validation, amount)
+            actual = money(sum((row.actual_cost or ZERO for row in pool), ZERO))
+            if not pool or actual != amount:
+                validation.add(
+                    "ERROR", "calculation", "REMARK_ALLOCATION_UNFULFILLED",
+                    "Assigned allocation cannot be fulfilled: no shipment, invalid CW, or amount mismatch. Review the DO and its HBLs.",
+                    pro=sources[0].pro, do_no=pool_key if pool_key != "REMAINDER" else "",
+                    raw_value=f"expected={amount}; actual={actual}",
+                )
+            else:
+                validation.add(
+                    "INFO", "calculation", "REMARK_ALLOCATION_APPLIED",
+                    "Remark-based allocation reconciled. The assigned DO amount is split among its HBLs by CW; any remainder uses only unassigned DOs.",
+                    pro=sources[0].pro, do_no=pool_key if pool_key != "REMAINDER" else "",
+                    raw_value=f"expected={amount}; actual={actual}",
+                )
+        # Customer sharing remains a PRO-level property, even with several allocation pools.
+        customers = {row.customer.casefold() for row in shipments if row.customer}
+        for row in shipments:
+            row.share_other_customer = "Y" if len(customers) > 1 else "N"
 
 
 def compare_pro_totals(raw_rows: Sequence[RawRow], calc_rows: Sequence[CalcRow], validation: ValidationLog) -> None:
@@ -1112,6 +1295,7 @@ def write_workbook(
     carrier_lookup: CarrierLookup,
     iwt_to: dict[str, str],
     validation: ValidationLog,
+    iwt_handling_office: Optional[dict[str, str]] = None,
 ) -> None:
     wb = Workbook()
     wb.remove(wb.active)
@@ -1137,14 +1321,15 @@ def write_workbook(
             or carrier_lookup.by_do.get(raw.do_no.casefold(), "")
             or carrier_lookup.by_pro.get(raw.pro.casefold(), "")
         )
-        do_cost = sum((row.actual_cost or ZERO for row in calc_by_do.get(raw.do_no.casefold(), [])), ZERO)
+        do_shipments = calc_by_do.get(raw.do_no.casefold(), [])
+        do_cost = sum((row.actual_cost or ZERO for row in do_shipments), ZERO)
         output_rows.append(
             [
                 raw.do_no,
                 raw.pro,
                 trucking_company,
                 excel_number(raw.amount),
-                excel_number(money(do_cost)),
+                None if any(row.allocation_invalid for row in do_shipments) else excel_number(money(do_cost)),
                 meta.customer,
                 meta.delivery_location,
                 meta.handling_office,
@@ -1153,6 +1338,7 @@ def write_workbook(
     append_table(ws_output, OUTPUT_HEADERS, output_rows)
 
     conflicting_pro_keys = set(raw_pro_amount_conflicts(raw_rows))
+    conflicting_pro_keys.update(row.pro.casefold() for row in calc_rows if row.allocation_invalid)
     conflicting_do_keys = set(raw_do_mapping_conflicts(raw_rows))
     for idx, raw in enumerate(raw_rows, start=2):
         rows_for_pro = [
@@ -1183,7 +1369,7 @@ def write_workbook(
 
     append_table(
         ws_calc,
-        CALC_HEADERS,
+        CALC_HEADERS + ["Raw Remarks", "Assigned DO Amount", "Allocation Group", "Allocation Budget"],
         [
             [
                 row.do_no,
@@ -1199,6 +1385,10 @@ def write_workbook(
                 row.customer,
                 row.share_other_customer,
                 row.handling_office,
+                row.raw_row.remark if row.raw_row else "",
+                excel_number(row.raw_row.assigned_amount) if row.raw_row else None,
+                row.allocation_group,
+                excel_number(row.allocation_budget),
             ]
             for row in calc_rows
         ],
@@ -1210,11 +1400,28 @@ def write_workbook(
             f'IF(COUNTIF($F$2:F{excel_row},F{excel_row})=1,'
             f'H{excel_row}-(SUMIF(F:F,F{excel_row},H:H)-G{excel_row}),H{excel_row}))'
         )
+        if row.allocation_invalid:
+            ws_calc.cell(excel_row, 8).value = None
+            ws_calc.cell(excel_row, 9).value = None
+        elif row.allocation_group:
+            last = len(calc_rows) + 1
+            group_range = f"$P$2:$P${last}"
+            cw_range = f"$C$2:$C${last}"
+            est_range = f"$H$2:$H${last}"
+            denominator = f'SUMIFS({cw_range},{group_range},P{excel_row},{cw_range},">0")'
+            ws_calc.cell(excel_row, 8).value = (
+                f'=IFERROR(IF(C{excel_row}>0,ROUND(C{excel_row}/{denominator}*Q{excel_row},2),0),0)'
+            )
+            ws_calc.cell(excel_row, 9).value = (
+                f'=IF(C{excel_row}>0,IF(COUNTIFS($P$2:P{excel_row},P{excel_row},'
+                f'$C$2:C{excel_row},">0")=1,'
+                f'H{excel_row}+Q{excel_row}-SUMIF({group_range},P{excel_row},{est_range}),H{excel_row}),0)'
+            )
         if row.customer.casefold() in HIGHLIGHT_CUSTOMERS:
             fill_row(ws_calc, excel_row, ORANGE_FILL)
         if row.handling_office and row.handling_office.casefold() != "apex-ord":
             fill_row(ws_calc, excel_row, ORANGE_FILL)
-        if row.h_cw is None or row.h_cw <= ZERO or not row.hbl_no:
+        if row.allocation_invalid or row.h_cw is None or row.h_cw <= ZERO or not row.hbl_no:
             fill_row(ws_calc, excel_row, ERROR_FILL)
 
     do_rows = []
@@ -1222,7 +1429,8 @@ def write_workbook(
     tms_rows = []
     do_upload_rows = []
     do_ar_rows = []
-    for row in calc_rows:
+    do_ar_calc_indices = []
+    for calc_index, row in enumerate(calc_rows, start=2):
         trucking = get_trucking_for_pro(row.pro, raw_rows, dispatch_meta, carrier_lookup)
         if row.do_no.upper().startswith("DO"):
             handling_party = ""
@@ -1241,6 +1449,7 @@ def write_workbook(
                     )
             ar_party = handling_party or AR_BILLING_PARTIES.get(row.customer.casefold(), "")
             if ar_party:
+                do_ar_calc_indices.append(calc_index)
                 do_ar_rows.append(
                     [
                         "",
@@ -1321,6 +1530,7 @@ def write_workbook(
                     row.pro,
                     trucking,
                     row.customer,
+                    (iwt_handling_office or {}).get(row.hbl_no.casefold(), ""),
                 ]
             )
 
@@ -1329,12 +1539,9 @@ def write_workbook(
     append_table(ws_tms, TMS_HEADERS, tms_rows)
     append_table(ws_do_upload, UPLOAD_HEADERS, do_upload_rows)
     append_table(ws_do_arupload, UPLOAD_HEADERS, do_ar_rows)
-    calc_last_row = max(ws_calc.max_row, 2)
-    for excel_row in range(2, ws_do_arupload.max_row + 1):
-        ws_do_arupload.cell(excel_row, 11).value = (
-            f'=IFERROR(INDEX(\'calculation\'!$I$2:$I${calc_last_row},'
-            f'MATCH(F{excel_row},\'calculation\'!$J$2:$J${calc_last_row},0)),0)'
-        )
+    for excel_row, calc_index in enumerate(do_ar_calc_indices, start=2):
+        if not calc_rows[calc_index - 2].allocation_invalid:
+            ws_do_arupload.cell(excel_row, 11).value = f"='calculation'!I{calc_index}"
 
     append_table(
         ws_validation,
@@ -1364,6 +1571,9 @@ def write_workbook(
 
     style_sheet(ws_output, money_cols=[4, 5])
     style_sheet(ws_calc, money_cols=[5, 7, 8, 9], numeric_cols=[3, 4])
+    for column in (15, 17):
+        for row_number in range(2, ws_calc.max_row + 1):
+            ws_calc.cell(row_number, column).number_format = "#,##0.00"
     style_sheet(ws_do, money_cols=[6, 7, 8], numeric_cols=[4, 5])
     style_sheet(ws_iwt, money_cols=[6, 7, 8], numeric_cols=[4, 5])
     style_sheet(ws_tms, money_cols=[6, 7, 8], numeric_cols=[4, 5])
@@ -1408,6 +1618,7 @@ def build_workbook(
     raw_rows = read_raw_rows(input_path, validation)
     progress(f"      Found {len(raw_rows)} Raw row(s).")
     carrier_lookup = read_carrier_lookup(carrier_path, validation)
+    iwt_handling_office = {}
 
     if use_existing_output:
         progress(f"[2/8] Reading debug/reference workbook: {use_existing_output}")
@@ -1449,23 +1660,34 @@ def build_workbook(
                         handling_office=clean_text(ws_out.cell(row_number, 8).value),
                     )
         iwt_to = {}
+        if "IWT" in ref.sheetnames:
+            ws_iwt = ref["IWT"]
+            if clean_text(ws_iwt.cell(1, 13).value).casefold() == "handling office":
+                for number in range(2, ws_iwt.max_row + 1):
+                    hbl = clean_text(ws_iwt.cell(number, 2).value)
+                    office = clean_text(ws_iwt.cell(number, 13).value)
+                    if hbl and office and office.casefold() != "apex-ord":
+                        iwt_handling_office[hbl.casefold()] = office
     else:
         progress("[2/8] Loading database configuration...")
-        xc_config, sc_config = load_config(env_path, Path(__file__).resolve().parent)
+        xc_config, sc_config, wms_config = load_config(env_path, Path(__file__).resolve().parent)
         do_numbers = unique_preserve(row.do_no for row in raw_rows)
         iwt_numbers = [do_no for do_no in do_numbers if do_no.upper().startswith("IWT")]
         dispatch_numbers = [do_no for do_no in do_numbers if not do_no.upper().startswith("IWT")]
         progress(
-            f"[3/8] Querying XC dispatch/IWT data "
+            f"[3/8] Querying XC dispatch / WMS IWT data "
             f"({len(dispatch_numbers)} dispatch-like DO, {len(iwt_numbers)} IWT)..."
         )
         try:
             dispatch_meta = query_dispatch_meta(xc_config, dispatch_numbers)
-            dispatch_meta.update(query_iwt_meta(xc_config, iwt_numbers))
             dispatch_rows = query_xc_dispatch_calc(xc_config, dispatch_numbers)
-            iwt_rows = query_xc_iwt_calc(xc_config, iwt_numbers)
         except pymysql.MySQLError as exc:
             raise ConverterError(f"XC database query failed: {exc}") from exc
+        try:
+            dispatch_meta.update(query_iwt_meta(wms_config, iwt_numbers))
+            iwt_rows = query_iwt_calc(wms_config, xc_config, iwt_numbers, validation)
+        except pymysql.MySQLError as exc:
+            raise ConverterError(f"WMS database query failed: {exc}") from exc
 
         found_keys = {
             row.do_no.casefold()
@@ -1474,7 +1696,7 @@ def build_workbook(
         }
         missing_for_xc = [do_no for do_no in do_numbers if do_no.casefold() not in found_keys]
         progress(
-            f"[4/8] Querying SC fallback for {len(missing_for_xc)} DO(s) not found in XC..."
+            f"[4/8] Querying SC fallback for {len(missing_for_xc)} DO(s) not found in XC/WMS..."
         )
         try:
             sc_rows = query_sc_fallback(sc_config, missing_for_xc)
@@ -1489,7 +1711,7 @@ def build_workbook(
                     "ERROR",
                     "output",
                     "DB_DO_NOT_FOUND",
-                    f"数据库 dispatch、iwt 和 SC fallback 都未查到 DO# {do_no}。",
+                    f"DO# {do_no} was not found in XC dispatch, WMS IWT or SC fallback.",
                     row=raw.source_row if raw else "",
                     pro=raw.pro if raw else "",
                     do_no=do_no,
@@ -1502,18 +1724,32 @@ def build_workbook(
         progress(f"[5/8] Querying SC job/customer info for {len(calc_rows)} calculation row(s)...")
         enrich_from_sc_jobinfo(calc_rows, sc_config, validation)
         progress("[6/8] Querying IWT destination/to-firm info...")
-        iwt_to = query_iwt_to(
-            xc_config,
-            unique_preserve(row.do_no for row in calc_rows if row.do_no.upper().startswith("IWT")),
-        )
+        try:
+            iwt_to = query_iwt_to(
+                wms_config,
+                unique_preserve(row.do_no for row in calc_rows if row.do_no.upper().startswith("IWT")),
+            )
+        except pymysql.MySQLError as exc:
+            raise ConverterError(f"WMS database query failed: {exc}") from exc
+
+        progress("      Querying XC handling office for IWT H#...")
+        try:
+            iwt_handling_office = query_iwt_handling_office(
+                xc_config,
+                [row.hbl_no for row in calc_rows if row.do_no.upper().startswith("IWT")],
+                validation,
+            )
+        except pymysql.MySQLError as exc:
+            raise ConverterError(f"XC database query failed: {exc}") from exc
 
     progress("[7/8] Allocating cost by chargeable weight and building sheets...")
     apply_raw_mappings(calc_rows, raw_rows)
     apply_handling_office(calc_rows, dispatch_meta)
-    allocate_costs(calc_rows, validation)
+    allocate_costs(calc_rows, validation, raw_rows)
     compare_pro_totals(raw_rows, calc_rows, validation)
     progress(f"[8/8] Saving workbook: {output_path}")
-    write_workbook(output_path, raw_rows, calc_rows, dispatch_meta, carrier_lookup, iwt_to, validation)
+    write_workbook(output_path, raw_rows, calc_rows, dispatch_meta, carrier_lookup, iwt_to, validation,
+                   iwt_handling_office=iwt_handling_office)
     return output_path, validation.counts()
 
 
@@ -1532,7 +1768,7 @@ def _save_upload(uploaded, label):
     return path
 
 
-def generate_payload(raw_upload, carrier_upload=None):
+def generate_payload(raw_upload, carrier_upload=None, language="zh"):
     input_path = _save_upload(raw_upload, "Raw workbook")
     if input_path is None:
         raise ConverterError("Select a Raw workbook first.")
@@ -1540,7 +1776,15 @@ def generate_payload(raw_upload, carrier_upload=None):
     token = uuid.uuid4().hex[:10]
     output_path = OUTPUT_DIR / "{0}_{1}_allocated.xlsx".format(input_path.stem, token)
     try:
-        final_path, counts = build_workbook(input_path, output_path, None, carrier_path)
+        # The language is module-level state, so runs are serialized.
+        with _RUN_LOCK:
+            set_language(language)
+            try:
+                final_path, counts = build_workbook(input_path, output_path, None, carrier_path)
+            except ConverterError:
+                raise
+            except pymysql.MySQLError as exc:
+                raise ConverterError(translate("database query failed: {0}".format(exc))) from exc
         check = load_workbook(final_path, read_only=True, data_only=False)
         missing = [name for name in ("output", "calculation", "DO", "IWT", "TMS-billing", "Validation_report", "DO_upload", "DO_ARupload") if name not in check.sheetnames]
         check.close()
