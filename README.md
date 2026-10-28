@@ -13,7 +13,8 @@ A Flask-based internal report platform for running accounting and operations rep
 - `Eason_DFW_Billing`: process a DFW billing workbook and generate full, DO, and NODO upload files.
 - `Eason Client Report`: search AP/AR charges by JOB_NO or HBL_NO for a billing office, with CSV export.
 - `ORD AE Closing Report`: review ORD air-export closing status and GP, then export results or a batch-closing file.
-- `ORD_DO_ALLOCATION`: allocate carrier PRO costs across ORD DO/IWT HBL rows and generate AP/AR upload workbooks.
+- `ORD_DO_ALLOCATION_V2`: allocate carrier PRO costs across ORD DO/IWT HBL rows (remark-assigned amounts, then chargeable weight; IWT weights from WMS + XC; IWT handling office from XC) and generate AP/AR upload workbooks.
+- `ORD_Inv_lookup`: upload a Raw Excel file (PRO#, AMT, DO#), look up customers in XC and AP invoices in SC (SELECT only), and export Raw_INV / Look_UP / Validation_Report with per-PRO USD reconciliation. Requires XC and SCDBUS.
 - `Truck Rate Manager`: manage pickups (name and address are editable), the delivery areas and ZIPs each pickup serves, and per-pickup rates, with a rate matrix, multi-pickup quote check, ZIP Map, and administrator operation log.
 
 - `PDF Field Extraction`: upload invoices, bills, and waybills (PDF, images, email, spreadsheets), extract fields with AI using per-vendor templates, review the results, and export to Excel or CSV. It is the former standalone PDF_EXTRACT app, served at `/tools/pdf-extract/` behind the platform login and feature grants; see `pdf_extract/` for its code. It is a Tools feature, so an administrator must grant it to a role.
@@ -47,7 +48,7 @@ You can also override each database profile separately with `SCDBUS_HOST`, `SCDB
 
 Set `FLASK_SECRET_KEY` to a private random value before startup; replace the example `change-me` value. Existing environment variables take precedence over `.env`. Restart the app after configuration changes. Database timeout settings are `DB_CONNECT_TIMEOUT` (10 seconds), `DB_READ_TIMEOUT` (600), and `DB_WRITE_TIMEOUT` (600). `CLOSING_REPORT_MAX_WORKERS` defaults to 4.
 
-`ORD_DO_ALLOCATION` also requires a dedicated XC connection, in addition to `SCDBUS`:
+`ORD_DO_ALLOCATION_V2` also requires dedicated XC and WMS connections, in addition to `SCDBUS`. Set `XC_DB_SSL=true` / `WMS_DB_SSL=true` if the server requires TLS:
 
 ```text
 XC_DB_HOST=your-xc-mysql-host
@@ -55,6 +56,12 @@ XC_DB_PORT=3306
 XC_DB_USER=your-xc-user
 XC_DB_PASSWORD=your-xc-password
 XC_DB_NAME=your-xc-database
+
+WMS_DB_HOST=your-wms-mysql-host
+WMS_DB_PORT=3306
+WMS_DB_USER=your-wms-user
+WMS_DB_PASSWORD=your-wms-password
+WMS_DB_NAME=your-wms-database
 ```
 
 ### Truck Rate storage and ZIP Map

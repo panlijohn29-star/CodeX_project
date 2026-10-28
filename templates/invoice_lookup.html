@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{ feature.title }}</title>
+<style>
+body{margin:0;background:#f5f7fa;color:#182633;font:14px/1.5 "Segoe UI",Arial,sans-serif}main{max-width:920px;margin:auto;padding:28px}a{color:#17658c}.card{background:#fff;border:1px solid #d7e0e8;border-radius:10px;padding:22px;margin-top:18px;box-shadow:0 3px 12px #193a5210}h1{margin:5px 0}.note{color:#617080}.field{display:block;font-weight:600;margin:18px 0 6px}input,select{width:100%;box-sizing:border-box;padding:10px;border:1px solid #bbc9d5;border-radius:6px;background:#fff}button{margin-top:20px;border:0;border-radius:6px;background:#17658c;color:#fff;padding:10px 16px;font-weight:700;cursor:pointer}button:disabled{opacity:.6}.error{color:#a42e2e;white-space:pre-wrap}.success{color:#246c4c}.result{margin-top:16px;padding:14px;border-radius:6px;background:#eef7f2}.result.fail{background:#fbeaea}.result.warning{background:#fff6dc}.warn{margin-top:10px;color:#536575}.rules{padding-left:20px;color:#536575}.hidden{display:none}.progress{display:none;margin-top:18px;padding:14px;border:1px solid #c9dce8;border-radius:8px;background:#f4f9fc}.progress.show{display:block}.track{height:9px;margin-top:10px;overflow:hidden;border-radius:99px;background:#dceaf2}.bar{width:42%;height:100%;border-radius:99px;background:#17658c;animation:waiting 1.2s ease-in-out infinite}@keyframes waiting{0%{transform:translateX(-125%)}100%{transform:translateX(345%)}}
+</style></head><body><main>
+<div class="note"><a href="/">Report Platform</a> / {{ feature.category }}</div><h1>{{ feature.title }}</h1>
+<p class="note">Upload a Raw Excel file with <b>PRO#</b>, <b>AMT</b>, and <b>DO#</b>. The tool reads customers from XC, finds AP invoices in SC, and exports <b>Raw_INV</b>, <b>Look_UP</b> and <b>Validation_Report</b> sheets. Databases are only queried (SELECT).</p>
+<section class="card">
+<label class="field" for="raw">Raw workbook (.xlsx) *</label><input id="raw" type="file" accept=".xlsx">
+<div id="sheetWrap" class="hidden"><label class="field" for="sheet">Worksheet</label><select id="sheet"></select></div>
+<label class="field" for="since">Invoice date later than</label><input id="since" type="text" value="2026-09-01" placeholder="YYYY-MM-DD">
+<div class="note">Strictly later than 00:00:00 of this date (invoice_date &gt; date); cancelled invoices (status 3) are excluded.</div>
+<ul class="rules"><li>AR PROs (ending "- AR") need no AP invoice. IWT rows match only IWT customer invoices.</li><li>Only invoices created by USSDC.ORD / JOHNWU.ORD / SHILONG.ORD are used; ambiguous rows stay blank and are flagged.</li><li>Review the Validation_Report sheet: red = FAIL, yellow = WARNING. A 0.01 USD difference is reported.</li><li>Platform database configuration must include both XC and SCDBUS.</li></ul>
+<button id="run">Look up and export</button>
+<div id="progress" class="progress" role="status" aria-live="polite"><div id="progressText">Querying XC and SC, then validating amounts…</div><div class="track"><div class="bar"></div></div></div>
+<p id="status" class="note"></p><div id="result"></div>
+</section></main>
+<script>
+const $=id=>document.getElementById(id);
+function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+$('raw').onchange=()=>{$('sheetWrap').classList.add('hidden');$('sheet').innerHTML=''};
+$('run').onclick=async()=>{
+  const raw=$('raw').files[0];$('result').innerHTML='';$('status').className='note';
+  if(!raw){$('status').className='error';$('status').textContent='Select a Raw workbook first.';return}
+  $('run').disabled=true;$('progress').classList.add('show');$('status').textContent='This may take a few minutes. Please keep this page open.';
+  const data=new FormData();data.append('raw_workbook',raw);data.append('since',$('since').value);
+  if(!$('sheetWrap').classList.contains('hidden'))data.append('sheet',$('sheet').value);
+  try{
+    const r=await fetch('/api/invoice-lookup/generate',{method:'POST',body:data}),p=await r.json();
+    if(!r.ok){
+      if(p.sheets){$('sheet').innerHTML=p.sheets.map(n=>`<option>${esc(n)}</option>`).join('');$('sheetWrap').classList.remove('hidden')}
+      throw Error(p.error||'Lookup failed');
+    }
+    const cls=p.status==='FAIL'?'fail':p.status==='WARNING'?'warning':'';
+    $('status').className='success';$('status').textContent='Workbook exported: '+p.status;
+    $('result').innerHTML=`<div class="result ${cls}"><a href="${esc(p.download_url)}">${esc(p.filename)}</a><div class="warn">Rows: ${p.rows}. PRO amounts matched: ${p.pro_passed} / ${p.pro_total}. Errors: ${p.fail}. Warnings: ${p.warning}. Open the Validation_Report sheet for details.</div></div>`;
+  }catch(e){$('status').className='error';$('status').textContent=e.message}
+  finally{$('progress').classList.remove('show');$('run').disabled=false}
+};
+</script></body></html>

@@ -10,6 +10,7 @@ import features.ord_ae_closing as ord_ae_closing
 import features.truck_rate as truck_rate
 import features.ord_do_allocation as ord_do_allocation
 import features.pdf_extract as pdf_extract
+import features.invoice_lookup as invoice_lookup
 
 
 FEATURES = {
@@ -25,6 +26,7 @@ FEATURES = {
     truck_rate.FEATURE["id"]: truck_rate.FEATURE,
     ord_do_allocation.FEATURE["id"]: ord_do_allocation.FEATURE,
     pdf_extract.FEATURE["id"]: pdf_extract.FEATURE,
+    invoice_lookup.FEATURE["id"]: invoice_lookup.FEATURE,
 }
 
 
