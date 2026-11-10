@@ -10,7 +10,7 @@ import pymupdf
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from . import autotemplate, config, db, export, extractor, i18n, ingest, llm, pdf_utils, pipeline, usage, validate
 from .i18n import bi
@@ -135,6 +135,14 @@ class Template(BaseModel):
     items_label: str = ""
     unique_field: str = ""
     checks: list[dict] = []
+    auto_approve_score: int = 0  # 0 = every document needs review; otherwise a fresh extraction scoring at least this is skipped
+
+    @field_validator("auto_approve_score")
+    @classmethod
+    def _auto_approve_range(cls, v: int) -> int:
+        if v != 0 and not validate.AUTO_APPROVE_MIN <= v <= 100:
+            raise ValueError(f"auto_approve_score must be 0 (off) or between {validate.AUTO_APPROVE_MIN} and 100")
+        return v
 
 
 def _template_values(t: Template) -> dict:
@@ -154,11 +162,12 @@ def list_templates():
     counts = {}
     for d in db.list_rows("documents"):
         if d["template_id"]:
-            c = counts.setdefault(d["template_id"], {"docs": 0, "verified": 0})
+            c = counts.setdefault(d["template_id"], {"docs": 0, "verified": 0, "auto_approved": 0})
             c["docs"] += 1
             c["verified"] += d["verified"]
+            c["auto_approved"] += d["auto_approved"]
     for r in rows:
-        r.update(counts.get(r["id"], {"docs": 0, "verified": 0}))
+        r.update(counts.get(r["id"], {"docs": 0, "verified": 0, "auto_approved": 0}))
     return rows
 
 
@@ -183,8 +192,13 @@ def update_template(tid: int, t: Template):
         docs = [d for d in db.list_rows("documents", "template_id=? AND data IS NOT NULL", (tid,))]
         for d in docs:
             if d["status"] == "done":
-                db.update("documents", d["id"], {"issues": validate.validate(
-                    d["id"], tpl, d["data"], d.get("uncertain") or [], others=docs)})
+                issues = validate.validate(d["id"], tpl, d["data"], d.get("uncertain") or [], others=docs)
+                values = {"issues": issues}
+                # New rules can fail a document that was auto-approved under the old ones; it then needs a person.
+                if d["auto_approved"] and not validate.should_auto_approve(
+                        tpl, {"data": d["data"], "issues": issues, "has_text": d["has_text"]}):
+                    values["auto_approved"] = 0
+                db.update("documents", d["id"], values)
     return tpl
 
 
@@ -422,6 +436,7 @@ def _doc_summary(d: dict, names: dict, batches: dict, doc_usage: dict) -> dict:
         "batch_id": d["batch_id"], "batch": batches.get(d["batch_id"], ""), "exported_at": d["exported_at"],
         "template_id": d["template_id"], "template_name": names.get(d["template_id"], ""),
         "status": d["status"], "error": d["error"], "match_info": d["match_info"], "verified": d["verified"],
+        "auto_approved": d["auto_approved"],
         "errors": sum(1 for i in issues if i["level"] == "error"),
         "warnings": sum(1 for i in issues if i["level"] == "warning"),
         "items": len((d.get("data") or {}).get("items", [])),
@@ -720,8 +735,9 @@ def save_result(did: int, req: SaveReq):
     if req.verified:
         uncertain = []
     issues = validate.validate(did, tpl, data, uncertain)
+    # A person has now looked at (or changed) the result, so it is no longer an auto-approved one.
     values = {"data": data, "issues": issues, "uncertain": uncertain,
-              "verified": int(req.verified), "exported_at": None}
+              "verified": int(req.verified), "exported_at": None, "auto_approved": 0}
     if req.verified:
         # Keep what the person fixed and what they checked and left alone; later extractions learn from the first.
         corrections = extractor.diff_corrections(d.get("original_data"), data, tpl)
