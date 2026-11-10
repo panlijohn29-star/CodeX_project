@@ -65,7 +65,7 @@ def _release() -> None:
 def submit(doc_id: int, template_id: int | None = None, reuse: bool = False) -> None:
     """reuse: copy the result of an identical, already processed file instead of calling the AI (uploads only)."""
     global _outstanding
-    db.update("documents", doc_id, {"status": "pending", "error": ""})
+    db.update("documents", doc_id, {"status": "pending", "error": "", "auto_approved": 0})
     with _cond:
         _outstanding += 1
     executor().submit(process, doc_id, template_id, reuse, time.monotonic())
@@ -127,6 +127,8 @@ def _reuse(doc: dict, src: dict, stamp: str) -> bool:
         "notes": src["notes"], "corrections": [], "confirmed_flags": [],
         "model_used": src["model_used"], "verified": 0, "error": "",
         "exported_at": None, "template_stamp": stamp,
+        "auto_approved": int(validate.should_auto_approve(
+            template, {"data": src["data"], "issues": issues, "has_text": doc["has_text"]})),
     })
     return True
 
@@ -176,6 +178,8 @@ def _process(doc_id: int, template_id: int | None = None, reuse: bool = False) -
             "corrections": [], "confirmed_flags": [],
             "model_used": res["model_used"], "verified": 0, "error": "",
             "exported_at": None, "template_stamp": stamp,
+            "auto_approved": int(validate.should_auto_approve(
+                template, {"data": res["data"], "issues": issues, "has_text": doc["has_text"]})),
         })
     except llm.LLMError as e:
         db.update("documents", doc_id, {"status": "error", "error": i18n.enc(e.msg)})

@@ -55,6 +55,13 @@ td input, td select { width: 100%; }
 .badge.unmatched { background: #fef3c7; color: #92400e; }
 .badge.busy { background: #dbeafe; color: #1e40af; }
 .badge.verified { background: #e0e7ff; color: #3730a3; }
+.badge.auto { background: #ccfbf1; color: #115e59; }
+
+.callout { background: var(--warn); border: 1px solid var(--warn-b); border-left-width: 5px; border-radius: 8px; padding: 10px 14px 12px; }
+.callout-title { font-weight: 600; color: #7a5b00; margin-bottom: 8px; }
+.callout label.field { color: #5c4500; font-weight: 600; }
+.callout-text { flex: 1; min-width: 260px; font-size: 13px; line-height: 1.55; color: var(--text); padding-top: 2px; }
+.callout-text b { color: #8a2a0c; }
 
 .dropzone { border: 2px dashed #c3c9d1; border-radius: 8px; padding: 26px; text-align: center; color: var(--muted); cursor: pointer; background: #fafbfc; }
 .dropzone.over { border-color: var(--primary); background: #eff6ff; }

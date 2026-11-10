@@ -808,8 +808,10 @@ async function viewDocs() {
     const f = docsState.filter;
     if (!f) return true;
     if (f.startsWith("t:")) return String(d.template_id) === f.slice(2);
-    if (f === "lowscore") return d.confidence && d.confidence.level !== "high" && !d.verified;
-  return d.status === f || (f === "review" && d.status === "done" && !d.verified && (d.errors || d.warnings));
+    if (f === "lowscore") return d.confidence && d.confidence.level !== "high" && !d.verified && !d.auto_approved;
+    if (f === "auto") return !!d.auto_approved;
+    if (f === "todo") return d.status === "done" && !d.verified && !d.auto_approved;
+  return d.status === f || (f === "review" && d.status === "done" && !d.verified && !d.auto_approved && (d.errors || d.warnings));
   });
   const batchLabel = (b) => {
     const extra = `${b.docs}${pick(" 份", " docs")}${b.usage ? " · " + costText(b.usage) : ""}`;
@@ -861,6 +863,7 @@ async function viewDocs() {
     el("td", {}, d.template_name || el("span", { class: "muted" }, "—")),
     el("td", { title: L(() => loc(d.error) || loc(d.match_info)) }, statusBadge(d.status),
       d.verified ? [" ", el("span", { class: "badge verified" }, T("已核对", "Verified"))] : null,
+      d.auto_approved ? [" ", el("span", { class: "badge auto", title: T("达到模板设定的免检分数，跳过了人工核对；分数照实计算", "Reached the template's auto-approve score and skipped human review; the score is as calculated") }, T("免检", "Auto-approved"))] : null,
       d.exported_at ? [" ", el("span", { class: "badge", title: L(() => pick("导出于 ", "Exported at ") + d.exported_at.replace("T", " ")) },
         T("已导出", "Exported"))] : null),
     el("td", {}, scoreBadge(d.confidence)),
@@ -969,6 +972,8 @@ async function viewDocs() {
           opt("yes", T("已导出", "Exported"), docsState.exported)),
         el("select", { onchange: (e) => { docsState.filter = e.target.value; viewDocs(); } },
           opt("", T("全部文档", "All documents"), docsState.filter), opt("review", T("待核对（有提示）", "Needs review (has warnings)"), docsState.filter),
+          opt("todo", T("待人工核对（未核对、未免检）", "Awaiting review (not verified, not auto-approved)"), docsState.filter),
+          opt("auto", T("已免检", "Auto-approved"), docsState.filter),
           opt("lowscore", T("置信度偏低（<90，未核对）", "Low confidence (<90, unverified)"), docsState.filter),
           opt("unmatched", T("未识别模板", "No template matched"), docsState.filter), opt("error", T("出错", "Error"), docsState.filter),
           opt("done", T("已完成", "Done"), docsState.filter),
@@ -1033,6 +1038,7 @@ async function viewDoc(id) {
       el("button", { disabled: !next, onclick: () => (location.hash = `#/doc/${next.id}`) }, T("下一份", "Next"))),
     el("h2", { style: "margin:10px 0 6px" }, doc.filename, " ", statusBadge(doc.status),
       doc.verified ? [" ", el("span", { class: "badge verified" }, T("已核对", "Verified"))] : null,
+      doc.auto_approved ? [" ", el("span", { class: "badge auto" }, T("免检", "Auto-approved"))] : null,
       doc.confidence ? [" ", T("置信度 ", "Score "), scoreBadge(doc.confidence)] : null),
     el("div", { class: "small muted" }, L(() =>
       pick(`${doc.page_count} 页 · ${doc.has_text ? "电子版" : "扫描件"}`, `${doc.page_count} pages · ${doc.has_text ? "Digital" : "Scanned"}`) +
@@ -1288,7 +1294,7 @@ function resultEditor(doc, tpl, reload, goNext, showPage) {
 async function viewTemplates() {
   const templates = await api("GET", "/api/templates");
   const headers = [["名称", "Name"], ["识别关键词", "Keywords"], ["页面筛选", "Page filter"], ["字段数", "Fields"], ["模型", "Model"],
-    ["文档 / 已核对", "Docs / verified"], ["", ""]];
+    ["文档 / 已核对 / 免检", "Docs / verified / auto"], ["", ""]];
   $app.replaceChildren(el("div", { class: "panel" },
     el("div", { class: "row", style: "margin-bottom:12px" }, el("h2", { style: "margin:0" }, T("模板", "Templates")),
       el("span", { class: "muted small" }, T("一家供应商一个模板；上传的 PDF 会按“识别关键词”自动套用",
@@ -1304,7 +1310,8 @@ async function viewTemplates() {
         el("td", { class: "small muted" }, t.page_rule || T("全部页", "All pages")),
         el("td", {}, `${t.header_fields.length} + ${t.item_fields.length}`),
         el("td", { class: "small" }, t.provider === "default" ? T("默认", "Default") : t.provider, t.model ? ` / ${t.model}` : ""),
-        el("td", {}, `${t.docs} / ${t.verified}`),
+        el("td", {}, `${t.docs} / ${t.verified} / ${t.auto_approved}`,
+          t.auto_approve_score ? [" ", el("span", { class: "badge auto", title: T("该模板的免检分数", "This template's auto-approve score") }, `≥${t.auto_approve_score}`)] : null),
         el("td", {}, el("a", { class: "btn", href: `#/template/${t.id}` }, T("编辑", "Edit")), " ",
           el("button", { class: "link danger", onclick: async () => {
             if (!confirm(pick(`删除模板“${t.name}”？使用它的文档会变成“未识别”。`,
@@ -1317,7 +1324,7 @@ async function viewTemplates() {
 
 function emptyTemplate() {
   return { name: "", keywords: [], page_rule: "", provider: "default", model: "", instructions: "", suggest_hint: "", send_images: false, model_note: "",
-    header_fields: [], item_fields: [], items_label: "", unique_field: "", checks: [] };
+    header_fields: [], item_fields: [], items_label: "", unique_field: "", checks: [], auto_approve_score: 0 };
 }
 
 async function viewTemplate(id, params) {
@@ -1637,6 +1644,27 @@ async function viewTemplate(id, params) {
           el("span", { class: "small muted" }, T(
             " 默认只发文字层；有文字层的页面抽错列、漏字时再打开。没有文字层的扫描页总是发图片。",
             " By default only the text layer is sent; turn this on if digital pages get columns mixed up or characters missed. Scanned pages without a text layer always send images."))),
+        el("div", { class: "callout", style: "margin-top:12px" },
+          el("div", { class: "callout-title" }, "⚡ ", T("免检：达到分数就跳过人工核对", "Auto-approve: skip human review above a score")),
+          el("div", { class: "row", style: "align-items:flex-start;gap:16px" },
+            el("label", { class: "field", style: "width:220px" }, T("免检分数（留空 = 全部需要人工核对）", "Auto-approve score (empty = always review)"),
+              (() => {
+                const inp = el("input", { type: "number", min: 50, max: 100, step: 1, value: tpl.auto_approve_score || "",
+                  placeholder: T("如 95", "e.g. 95"),
+                  oninput: (e) => { const n = parseInt(e.target.value, 10); tpl.auto_approve_score = Number.isFinite(n) ? n : 0; },
+                  onchange: (e) => {
+                    if (tpl.auto_approve_score > 100) tpl.auto_approve_score = 100;
+                    else if (tpl.auto_approve_score > 0 && tpl.auto_approve_score < 50) tpl.auto_approve_score = 50;
+                    e.target.value = tpl.auto_approve_score || "";
+                  } });
+                return inp;
+              })()),
+            el("div", { class: "callout-text" },
+              T("用此模板抽取后，置信度不低于这个分数就跳过人工核对（标“免检”）。分数照实计算，不会按已核对的 100 分算。",
+                "After extraction with this template, a result scoring at least this skips human review (marked “Auto-approved”). The score is shown as calculated, never as the 100 of a verified document."),
+              " ", el("b", {}, T("有错误（必填为空、数值无效）、合计校验不符或疑似重复文件的，无论多少分都不会免检。",
+                "A result with errors (empty required field, invalid number), a failed sum check or a possible duplicate file is never auto-approved, whatever its score.")),
+              " ", T("范围 50–100，建议先从 95 试起。", "Range 50–100; 95 is a sensible place to start.")))),
         el("label", { class: "field", style: "margin-top:10px" }, T("给 AI 的额外说明（可选）", "Extra instructions for the AI (optional)"),
           el("textarea", { rows: 2, value: tpl.instructions,
             placeholder: T("如：金额列为空的行保持为空，不要自己分摊", "e.g. leave rows with an empty amount empty; don't split amounts yourself"),

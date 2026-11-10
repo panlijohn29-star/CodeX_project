@@ -141,7 +141,8 @@ def init_db() -> None:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(documents)")}
         for col, ddl in (("batch_id", "INTEGER"), ("exported_at", "TEXT"), ("file_hash", "TEXT"),
                          ("template_stamp", "TEXT"), ("timings", "TEXT"), ("source", "TEXT NOT NULL DEFAULT ''"),
-                         ("corrections", "TEXT NOT NULL DEFAULT '[]'"), ("confirmed_flags", "TEXT NOT NULL DEFAULT '[]'")):
+                         ("corrections", "TEXT NOT NULL DEFAULT '[]'"), ("confirmed_flags", "TEXT NOT NULL DEFAULT '[]'"),
+                         ("auto_approved", "INTEGER NOT NULL DEFAULT 0")):
             if col not in cols:
                 conn.execute(f"ALTER TABLE documents ADD COLUMN {col} {ddl}")
         ucols = {r["name"] for r in conn.execute("PRAGMA table_info(llm_usage)")}
@@ -150,7 +151,8 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_hash ON documents(file_hash)")
         tcols = {r["name"] for r in conn.execute("PRAGMA table_info(templates)")}
         for col, ddl in (("send_images", "INTEGER NOT NULL DEFAULT 0"), ("model_note", "TEXT NOT NULL DEFAULT ''"),
-                         ("auto_generated", "INTEGER NOT NULL DEFAULT 0"), ("suggest_hint", "TEXT NOT NULL DEFAULT ''")):
+                         ("auto_generated", "INTEGER NOT NULL DEFAULT 0"), ("suggest_hint", "TEXT NOT NULL DEFAULT ''"),
+                         ("auto_approve_score", "INTEGER NOT NULL DEFAULT 0")):
             if col not in tcols:
                 conn.execute(f"ALTER TABLE templates ADD COLUMN {col} {ddl}")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_batch ON documents(batch_id)")
