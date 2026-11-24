@@ -30,6 +30,7 @@ import features.eason_client_report as eason_client_report
 import features.ord_ae_closing as ord_ae_closing
 import features.ord_do_allocation as ord_do_allocation
 import features.invoice_lookup as invoice_lookup
+import features.hts_code_update as hts_code_update
 from features import get_feature, list_features
 import maintenance_notice
 from platform_config import env_value
@@ -833,6 +834,12 @@ FEATURE_ENDPOINTS = {
     "ord_do_allocation_download": "ord_do_allocation",
     "invoice_lookup_generate": "invoice_lookup",
     "invoice_lookup_download": "invoice_lookup",
+    "hts_code_update_preview": "hts_code_update",
+    "hts_code_update_execute": "hts_code_update",
+    "hts_code_update_publish_preview": "hts_code_update",
+    "hts_code_update_publish_execute": "hts_code_update",
+    "hts_code_update_batches": "hts_code_update",
+    "hts_code_update_activate": "hts_code_update",
     "sql_query_start": "sql_query",
     "sql_query_status": "sql_query",
     "sql_query_cancel": "sql_query",
@@ -1981,6 +1988,63 @@ def invoice_lookup_generate():
     except Exception:
         app.logger.exception("Invoice Lookup failed")
         return jsonify({"error": "处理发生意外错误；未生成有效结果。"}), 500
+
+
+@app.post("/api/hts-code-update/preview")
+@require_login
+@require_feature_access("hts_code_update")
+def hts_code_update_preview():
+    return _interactive_tool_response(lambda: hts_code_update.preview_payload(
+        request.files.get("workbook"), request.files.get("exp_file"), request.files.get("imp_file"),
+    ))
+
+
+@app.post("/api/hts-code-update/execute")
+@require_login
+@require_feature_access("hts_code_update")
+def hts_code_update_execute():
+    payload = request.get_json(silent=True) or {}
+    return _interactive_tool_response(
+        lambda: hts_code_update.execute_payload(payload.get("token"), session.get("user_id", "admin"))
+    )
+
+
+@app.post("/api/hts-code-update/publish-preview")
+@require_login
+@require_feature_access("hts_code_update")
+def hts_code_update_publish_preview():
+    return _interactive_tool_response(hts_code_update.publish_preview_payload)
+
+
+@app.post("/api/hts-code-update/publish-execute")
+@require_login
+@require_feature_access("hts_code_update")
+def hts_code_update_publish_execute():
+    payload = request.get_json(silent=True) or {}
+    return _interactive_tool_response(
+        lambda: hts_code_update.publish_execute_payload(
+            payload.get("remark"),
+            payload.get("expire_remark"),
+            payload.get("expire_rows"),
+            payload.get("load_rows"),
+            session.get("user_id", "admin"),
+        )
+    )
+
+
+@app.post("/api/hts-code-update/batches")
+@require_login
+@require_feature_access("hts_code_update")
+def hts_code_update_batches():
+    return _interactive_tool_response(hts_code_update.list_batches_payload)
+
+
+@app.post("/api/hts-code-update/activate")
+@require_login
+@require_feature_access("hts_code_update")
+def hts_code_update_activate():
+    payload = request.get_json(silent=True) or {}
+    return _interactive_tool_response(lambda: hts_code_update.activate_batch_payload(payload.get("remark")))
 
 
 @app.get("/download/invoice-lookup/<filename>")
