@@ -1,0 +1,500 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ feature.title }} | Report Platform</title>
+  <style>
+    :root {
+      --bg: #f6f7f9;
+      --surface: #ffffff;
+      --ink: #17202a;
+      --muted: #607080;
+      --line: #d8dee6;
+      --accent: #145a7a;
+      --accent-dark: #0f435c;
+      --ok: #2e6b3a;
+      --bad: #a12727;
+      --warn: #8a5a00;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Arial, Helvetica, sans-serif; background: var(--bg); color: var(--ink); }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .shell { max-width: 1180px; margin: 0 auto; padding: 24px 20px 44px; }
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--line);
+    }
+    h1 { margin: 0; font-size: 28px; line-height: 1.2; }
+    h2 { margin: 0 0 14px; font-size: 18px; }
+    .muted, .meta, .status, .error { color: var(--muted); font-size: 14px; line-height: 1.45; }
+    .error { color: var(--bad); }
+    .warn { color: var(--warn); }
+    .layout { display: grid; grid-template-columns: 0.8fr 1.2fr; gap: 20px; margin-top: 22px; }
+    .section {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 18px;
+      min-width: 0;
+    }
+    .field { display: grid; gap: 8px; margin-bottom: 14px; }
+    .field label { font-size: 14px; font-weight: 700; }
+    input[type="file"] {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      font-size: 14px;
+      background: #fff;
+    }
+    button {
+      border: 0;
+      background: var(--accent);
+      color: white;
+      padding: 10px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 700;
+    }
+    button.secondary { background: #607080; }
+    button.danger { background: #a12727; }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 16px; }
+    .rules { margin: 14px 0 0; padding-left: 18px; color: var(--muted); font-size: 13px; line-height: 1.55; }
+    .counts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 12px 0 4px; }
+    .count { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: #fbfcfd; }
+    .count strong { display: block; font-size: 22px; }
+    .count span { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+    .tablewrap { overflow-x: auto; max-height: 260px; overflow-y: auto; border: 1px solid var(--line); border-radius: 6px; margin-top: 8px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border-bottom: 1px solid var(--line); padding: 8px; text-align: left; font-size: 13px; vertical-align: top; }
+    th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; position: sticky; top: 0; background: #fff; }
+    .tabs { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+    .tab { background: #eef1f5; color: var(--ink); }
+    .tab[aria-selected="true"] { background: var(--accent); color: #fff; }
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      background: #fbfcfd;
+      margin-top: 16px;
+    }
+    .hidden { display: none; }
+    .old { color: var(--bad); text-decoration: line-through; }
+    .new { color: var(--ok); }
+    .toast-center {
+      position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 70;
+      background: rgba(29, 35, 43, .94); color: #fff; padding: 16px 28px; border-radius: 10px; font-size: 16px; font-weight: 600;
+      box-shadow: 0 8px 28px rgba(0, 0, 0, .25); pointer-events: none; animation: toast-center 1.8s ease forwards;
+    }
+    .toast-center::before { content: "\2713"; color: #4fd18a; margin-right: 10px; font-size: 20px; }
+    @keyframes toast-center {
+      0% { opacity: 0; transform: translate(-50%, -46%); }
+      12% { opacity: 1; transform: translate(-50%, -50%); }
+      75% { opacity: 1; }
+      100% { opacity: 0; }
+    }
+    @media (max-width: 860px) {
+      .layout { grid-template-columns: 1fr; }
+      .counts { grid-template-columns: repeat(2, 1fr); }
+      .topbar { align-items: flex-start; flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <div class="meta"><a href="/">Report Platform</a> / {{ feature.category }}</div>
+        <h1>{{ feature.title }}</h1>
+        <div class="muted">{{ feature.description }}</div>
+      </div>
+      <div class="muted">Signed in as {{ user_id }} | <a href="/logout">Log out</a></div>
+    </header>
+
+    <div class="layout">
+      <section class="section">
+        <h2>Step 1 - Load Excel into the temp table</h2>
+        <div class="field">
+          <label for="workbook">Option A: Excel file (.xlsx)</label>
+          <input id="workbook" type="file" accept=".xlsx">
+        </div>
+        <div class="field">
+          <label>Option B: Census text files (merged for you)</label>
+          <input id="expFile" type="file" accept=".txt" aria-label="exp-code.txt">
+          <input id="impFile" type="file" accept=".txt" aria-label="imp-code.txt">
+          <div class="meta">Choose <strong>exp-code.txt</strong> first, then <strong>imp-code.txt</strong>. If both are chosen they are used instead of the Excel file.</div>
+        </div>
+        <div class="actions">
+          <button id="previewBtn" type="button">Check file</button>
+          <button id="resetBtn" type="button" class="secondary">Reset</button>
+        </div>
+        <div id="statusText" class="status" style="margin-top:12px" role="status">Ready</div>
+        <ul class="rules">
+          <li>Database: <strong>scdbus</strong>, table <code>s_sys_dict_outside_code_hts202501</code>.</li>
+          <li>Option B: EXP rows are kept, IMP rows whose code is not in EXP are added, sorted by code (this replaces the old build_hts script). Fixed-width columns: code, long description, unit 1, unit 2.</li>
+          <li>Option A: first sheet, header row with <strong>FREE_FIELD1</strong> (HTS code, 10 digits), <strong>FREE_FIELD2</strong> (description), <strong>FREE_FIELD3</strong>, <strong>FREE_FIELD4</strong> (or hs, lalpha, auq1, AUQ2). Other columns (such as IMP_EXP) are ignored.</li>
+          <li>Rows are loaded with SYS_CODE_ID = 0 and SYS_CODE_TYPE_ID = 2016110115490001.</li>
+          <li><strong>The whole table is emptied first, then the file is loaded.</strong> Codes that are in the table but not in the file are removed.</li>
+          <li>Every loaded row gets REMARK = today's date (YYYY-MM-DD).</li>
+          <li>The file must have no invalid rows (bad or duplicate codes). Fix them and upload again.</li>
+          <li>The table is truncated and cannot be rolled back. If the load fails, fix the problem and upload again.</li>
+          <li>Nothing is changed until you confirm.</li>
+        </ul>
+      </section>
+
+      <section class="section">
+        <h2>Result</h2>
+        <div id="emptyState" class="muted">Choose a file and click Check file to see what will change.</div>
+        <div id="resultPanel" class="hidden">
+          <div class="meta" id="resultMeta"></div>
+          <div class="counts">
+            <div class="count"><strong id="cntLoad">0</strong><span>Rows to load</span></div>
+            <div class="count"><strong id="cntCurrent">0</strong><span>Rows in table now</span></div>
+            <div class="count"><strong id="cntNew">0</strong><span>New codes</span></div>
+            <div class="count"><strong id="cntDrop">0</strong><span>Codes removed</span></div>
+          </div>
+          <div id="padNote" class="meta warn hidden"></div>
+          <div class="tabs" role="tablist">
+            <button type="button" class="tab" data-tab="rows" role="tab">Rows to load</button>
+            <button type="button" class="tab" data-tab="bad" role="tab">Invalid</button>
+          </div>
+          <div class="tablewrap"><table><thead id="tHead"></thead><tbody id="tBody"></tbody></table></div>
+          <div id="truncNote" class="meta" style="margin-top:6px"></div>
+        </div>
+
+        <div id="confirmPanel" class="panel hidden">
+          <strong>Confirm</strong>
+          <div id="confirmText" class="meta" style="margin-top:8px"></div>
+          <div class="actions">
+            <button id="executeBtn" type="button" class="danger">Confirm: replace table</button>
+          </div>
+          <div id="execError" class="error" role="alert" style="margin-top:10px"></div>
+        </div>
+      </section>
+    </div>
+
+    <section class="section" style="margin-top:20px">
+      <h2>Step 2 - Publish the temp table to s_sys_dict_outside_code</h2>
+      <div class="muted">Expires the active batch (B_OCEAN/AIR fields set to NULL, REMARK kept) and adds the temp table rows as a new active batch. REMARK is taken from the temp table. Both happen in one transaction.</div>
+      <div class="actions">
+        <button id="pubPreviewBtn" type="button">Check publish</button>
+        <button id="batchesBtn" type="button" class="secondary">Show batches</button>
+      </div>
+      <div id="pubError" class="error" role="alert" style="margin-top:10px"></div>
+      <div id="pubResult" class="hidden">
+        <div class="counts">
+          <div class="count"><strong id="pubLoad">0</strong><span>Rows to add</span></div>
+          <div class="count"><strong id="pubExpire">0</strong><span id="pubExpireLabel">Rows to expire</span></div>
+          <div class="count"><strong id="pubAdded">0</strong><span>New codes</span></div>
+          <div class="count"><strong id="pubRemoved">0</strong><span>Codes removed</span></div>
+        </div>
+        <div id="pubMeta" class="meta"></div>
+        <div class="tabs">
+          <button type="button" class="tab" id="pubTabRemoved" data-tab="removed" aria-selected="true">Removed codes</button>
+          <button type="button" class="tab" id="pubTabChanged" data-tab="changed" aria-selected="false">Changed codes</button>
+        </div>
+        <div class="tablewrap"><table><thead id="pubHead"></thead><tbody id="pubBody"></tbody></table></div>
+        <div class="panel">
+          <strong>Confirm</strong>
+          <div id="pubConfirmText" class="meta" style="margin-top:8px"></div>
+          <div class="actions"><button id="pubExecuteBtn" type="button" class="danger">Confirm: publish new batch</button></div>
+        </div>
+      </div>
+      <div id="batchPanel" class="hidden">
+        <div class="tablewrap"><table>
+          <thead><tr><th>Batch (REMARK)</th><th>Rows</th><th>Status</th><th></th></tr></thead>
+          <tbody id="batchBody"></tbody>
+        </table></div>
+        <div class="meta" style="margin-top:6px">Make active: this batch becomes the only active one; every other batch is expired.</div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const workbook = document.getElementById("workbook");
+    const expFile = document.getElementById("expFile");
+    const impFile = document.getElementById("impFile");
+    const previewBtn = document.getElementById("previewBtn");
+    const resetBtn = document.getElementById("resetBtn");
+    const statusText = document.getElementById("statusText");
+    const emptyState = document.getElementById("emptyState");
+    const resultPanel = document.getElementById("resultPanel");
+    const resultMeta = document.getElementById("resultMeta");
+    const padNote = document.getElementById("padNote");
+    const tHead = document.getElementById("tHead");
+    const tBody = document.getElementById("tBody");
+    const truncNote = document.getElementById("truncNote");
+    const confirmPanel = document.getElementById("confirmPanel");
+    const confirmText = document.getElementById("confirmText");
+    const executeBtn = document.getElementById("executeBtn");
+    const execError = document.getElementById("execError");
+    const tabs = Array.from(document.querySelectorAll("#resultPanel .tab"));
+    let preview = null;
+    let activeTab = "rows";
+
+    function escapeHtml(text) {
+      return String(text ?? "").replace(/[&<>"']/g, (char) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"
+      }[char]));
+    }
+
+    function toastCenter(message) {
+      const box = document.createElement("div");
+      box.className = "toast-center";
+      box.setAttribute("role", "status");
+      box.textContent = message;
+      document.body.appendChild(box);
+      setTimeout(() => box.remove(), 1900);
+    }
+
+    function showStatus(message, cls) {
+      statusText.textContent = message;
+      statusText.className = cls || "status";
+    }
+
+    function setBusy(isBusy) {
+      previewBtn.disabled = isBusy;
+      executeBtn.disabled = isBusy;
+    }
+
+    function clearResult() {
+      preview = null;
+      emptyState.classList.remove("hidden");
+      resultPanel.classList.add("hidden");
+      confirmPanel.classList.add("hidden");
+      execError.textContent = "";
+    }
+
+    function renderTab() {
+      tabs.forEach((tab) => tab.setAttribute("aria-selected", tab.dataset.tab === activeTab ? "true" : "false"));
+      let head = "", body = "", shown = 0, total = 0;
+      if (activeTab === "rows") {
+        head = "<tr><th>Row</th><th>FREE_FIELD1</th><th>FREE_FIELD2</th><th>FREE_FIELD3</th><th>FREE_FIELD4</th></tr>";
+        body = preview.samples.map((r) => `<tr><td>${r.row}</td><td>${escapeHtml(r.FREE_FIELD1)}</td><td>${escapeHtml(r.FREE_FIELD2)}</td><td>${escapeHtml(r.FREE_FIELD3)}</td><td>${escapeHtml(r.FREE_FIELD4)}</td></tr>`).join("");
+        shown = preview.samples.length; total = preview.to_load;
+      } else {
+        head = "<tr><th>Row</th><th>Code</th><th>Problem</th></tr>";
+        body = preview.problems.map((r) => `<tr><td>${r.row}</td><td>${escapeHtml(r.code)}</td><td class="error">${escapeHtml(r.message)}</td></tr>`).join("");
+        shown = preview.problems.length; total = preview.invalid;
+      }
+      tHead.innerHTML = head;
+      tBody.innerHTML = body || `<tr><td colspan="5" class="muted">None</td></tr>`;
+      truncNote.textContent = total > shown ? `Showing the first ${shown} of ${total}.` : "";
+    }
+
+    function renderResult(payload) {
+      preview = payload;
+      emptyState.classList.add("hidden");
+      resultPanel.classList.remove("hidden");
+      resultMeta.textContent = `${payload.db_profile} / ${payload.table} / ${payload.total_rows} data rows read` + (payload.source === "census_text"
+        ? ` (EXP ${payload.exp_rows} + IMP-only ${payload.imp_only}; ${payload.overlap} codes in both, EXP kept` + (payload.skipped_lines ? `; ${payload.skipped_lines} line(s) without a code skipped` : "") + ")"
+        : "");
+      document.getElementById("cntLoad").textContent = payload.to_load;
+      document.getElementById("cntCurrent").textContent = payload.current_rows;
+      document.getElementById("cntNew").textContent = payload.new_codes;
+      document.getElementById("cntDrop").textContent = payload.dropped_codes;
+      padNote.classList.toggle("hidden", !payload.padded);
+      padNote.textContent = payload.padded ? `${payload.padded} code(s) had fewer than 10 digits and were padded with leading zeros (Excel often drops them). Please check.` : "";
+      activeTab = payload.invalid ? "bad" : "rows";
+      renderTab();
+      const canLoad = Boolean(payload.token);
+      confirmPanel.classList.toggle("hidden", !canLoad);
+      if (canLoad) {
+        confirmText.innerHTML = `This will <strong>truncate</strong> (delete all ${payload.current_rows} rows of) in <strong>${escapeHtml(payload.db_profile)}</strong> ${escapeHtml(payload.table)}, then load <strong>${payload.to_load}</strong> rows from the file with REMARK <strong>${escapeHtml(payload.remark)}</strong>. ${payload.dropped_codes} existing code(s) not in the file will be removed.`;
+      }
+    }
+
+    previewBtn.addEventListener("click", async () => {
+      clearResult();
+      const useText = expFile.files.length || impFile.files.length;
+      if (useText && !(expFile.files.length && impFile.files.length)) {
+        showStatus("Please choose both exp-code.txt and imp-code.txt", "error");
+        return;
+      }
+      if (!useText && !workbook.files.length) {
+        showStatus("Please choose an Excel (.xlsx) file or the two Census text files", "error");
+        return;
+      }
+      setBusy(true);
+      showStatus("Checking file...");
+      try {
+        const form = new FormData();
+        if (useText) {
+          form.append("exp_file", expFile.files[0]);
+          form.append("imp_file", impFile.files[0]);
+        } else {
+          form.append("workbook", workbook.files[0]);
+        }
+        const response = await fetch("/api/hts-code-update/preview", { method: "POST", body: form });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || "Request failed");
+        renderResult(payload);
+        showStatus(payload.token ? "Review the changes, then confirm." : (payload.invalid ? "Fix the invalid rows and upload again." : "Nothing to load."), payload.invalid ? "warn" : "status");
+      } catch (error) {
+        showStatus(error.message || "Request failed", "error");
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    executeBtn.addEventListener("click", async () => {
+      if (!preview || !preview.token) return;
+      setBusy(true);
+      execError.textContent = "";
+      showStatus("Loading...");
+      try {
+        const response = await fetch("/api/hts-code-update/execute", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token: preview.token })
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || "Request failed");
+        showStatus(payload.message, "status");
+        toastCenter("Saved");
+        clearResult();
+        workbook.value = ""; expFile.value = ""; impFile.value = "";
+      } catch (error) {
+        execError.textContent = error.message || "Request failed";
+        showStatus("Load failed", "error");
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    const pubPreviewBtn = document.getElementById("pubPreviewBtn");
+    const pubExecuteBtn = document.getElementById("pubExecuteBtn");
+    const batchesBtn = document.getElementById("batchesBtn");
+    const pubError = document.getElementById("pubError");
+    const pubResult = document.getElementById("pubResult");
+    const batchPanel = document.getElementById("batchPanel");
+    const batchBody = document.getElementById("batchBody");
+    let pub = null;
+    let pubTab = "removed";
+
+    async function postJson(url, body) {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body || {})
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "Request failed");
+      return payload;
+    }
+
+    function setPubBusy(isBusy) {
+      pubPreviewBtn.disabled = isBusy;
+      pubExecuteBtn.disabled = isBusy;
+      batchesBtn.disabled = isBusy;
+      batchBody.querySelectorAll("button").forEach((button) => { button.disabled = isBusy; });
+    }
+
+    function renderPubTab() {
+      document.querySelectorAll("#pubResult .tab").forEach((tab) => tab.setAttribute("aria-selected", tab.dataset.tab === pubTab ? "true" : "false"));
+      const head = document.getElementById("pubHead");
+      const body = document.getElementById("pubBody");
+      if (pubTab === "removed") {
+        head.innerHTML = "<tr><th>FREE_FIELD1</th></tr>";
+        body.innerHTML = pub.removed_codes.map((code) => `<tr><td>${escapeHtml(code)}</td></tr>`).join("") || `<tr><td class="muted">None</td></tr>`;
+      } else {
+        head.innerHTML = "<tr><th>FREE_FIELD1</th><th>Changes</th></tr>";
+        body.innerHTML = pub.changed_samples.map((r) => `<tr><td>${escapeHtml(r.code)}</td><td>` + Object.entries(r.changes).map(([field, c]) =>
+          `${field}: <span class="old">${escapeHtml(c.old || "(empty)")}</span> &rarr; <span class="new">${escapeHtml(c.new || "(empty)")}</span>`).join("<br>") + "</td></tr>").join("") || `<tr><td colspan="2" class="muted">None</td></tr>`;
+      }
+    }
+
+    function clearPub() {
+      pub = null;
+      pubResult.classList.add("hidden");
+    }
+
+    pubPreviewBtn.addEventListener("click", async () => {
+      clearPub();
+      pubError.textContent = "";
+      setPubBusy(true);
+      try {
+        pub = await postJson("/api/hts-code-update/publish-preview");
+        document.getElementById("pubLoad").textContent = pub.load_rows;
+        document.getElementById("pubExpire").textContent = pub.expire_rows;
+        document.getElementById("pubAdded").textContent = pub.added;
+        document.getElementById("pubRemoved").textContent = pub.removed;
+        document.getElementById("pubExpireLabel").textContent = `Rows to expire (${pub.expire_remark})`;
+        document.getElementById("pubMeta").textContent = `${pub.changed} code(s) have a changed description or unit (the new value is used).`;
+        document.getElementById("pubConfirmText").innerHTML = `In <strong>${escapeHtml(pub.db_profile)}</strong> ${escapeHtml(pub.real_table)}: expire batch <strong>${escapeHtml(pub.expire_remark)}</strong> (${pub.expire_rows} rows), then add <strong>${pub.load_rows}</strong> rows as batch <strong>${escapeHtml(pub.remark)}</strong> (SYS_CODE_ID from ${pub.first_id}).`;
+        pubTab = pub.removed ? "removed" : "changed";
+        renderPubTab();
+        pubResult.classList.remove("hidden");
+      } catch (error) {
+        pubError.textContent = error.message || "Request failed";
+      } finally {
+        setPubBusy(false);
+      }
+    });
+
+    document.querySelectorAll("#pubResult .tab").forEach((tab) => tab.addEventListener("click", () => { pubTab = tab.dataset.tab; if (pub) renderPubTab(); }));
+
+    pubExecuteBtn.addEventListener("click", async () => {
+      if (!pub) return;
+      pubError.textContent = "";
+      setPubBusy(true);
+      try {
+        const payload = await postJson("/api/hts-code-update/publish-execute", {
+          remark: pub.remark, expire_remark: pub.expire_remark, expire_rows: pub.expire_rows, load_rows: pub.load_rows
+        });
+        toastCenter("Saved");
+        showStatus(payload.message, "status");
+        clearPub();
+        if (!batchPanel.classList.contains("hidden")) await loadBatches();
+      } catch (error) {
+        pubError.textContent = error.message || "Request failed";
+      } finally {
+        setPubBusy(false);
+      }
+    });
+
+    async function loadBatches() {
+      const payload = await postJson("/api/hts-code-update/batches");
+      batchBody.innerHTML = payload.batches.map((b) => `<tr><td>${escapeHtml(b.remark)}</td><td>${b.rows}</td><td>${b.active ? "<strong class=\"new\">Active</strong>" : "Expired"}</td><td>${b.active ? "" : `<button type="button" class="secondary" data-remark="${escapeHtml(b.remark)}">Make active</button>`}</td></tr>`).join("");
+      batchPanel.classList.remove("hidden");
+    }
+
+    batchesBtn.addEventListener("click", async () => {
+      pubError.textContent = "";
+      setPubBusy(true);
+      try { await loadBatches(); } catch (error) { pubError.textContent = error.message || "Request failed"; } finally { setPubBusy(false); }
+    });
+
+    batchBody.addEventListener("click", async (event) => {
+      const button = event.target.closest("button[data-remark]");
+      if (!button) return;
+      const remark = button.dataset.remark;
+      if (!confirm(`Make batch ${remark} the only active batch? All other batches will be expired.`)) return;
+      pubError.textContent = "";
+      setPubBusy(true);
+      try {
+        const payload = await postJson("/api/hts-code-update/activate", { remark });
+        toastCenter("Saved");
+        showStatus(payload.message, "status");
+        await loadBatches();
+      } catch (error) {
+        pubError.textContent = error.message || "Request failed";
+      } finally {
+        setPubBusy(false);
+      }
+    });
+
+    tabs.forEach((tab) => tab.addEventListener("click", () => { activeTab = tab.dataset.tab; if (preview) renderTab(); }));
+    resetBtn.addEventListener("click", () => { workbook.value = ""; expFile.value = ""; impFile.value = ""; showStatus("Ready"); clearResult(); });
+    [workbook, expFile, impFile].forEach((input) => input.addEventListener("change", clearResult));
+  </script>
+</body>
+</html>
